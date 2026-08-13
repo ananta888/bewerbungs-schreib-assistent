@@ -1,0 +1,67 @@
+# Durable personal writing style for application material.
+# Capture stable preferences, not one-off wording defects.
+
+style_profile:
+  language: de
+  tone: direct
+  formality: professional_relaxed
+  directness: high
+  sentence_length: short_to_medium
+  technical_depth: high
+  enthusiasm: restrained
+  self_promotion: moderate
+  humor: minimal
+
+  vocabulary:
+    prefer:
+      - concrete examples
+      - technical precision
+      - plain language
+      - evidence before claims
+    avoid:
+      - exaggerated enthusiasm
+      - marketing language
+      - generic AI phrases
+      - excessive adjectives
+
+  preferred_patterns:
+    - Start with relevance instead of generic enthusiasm.
+    - Use specific technologies and project contexts where supported.
+    - Keep claims grounded in observable work.
+    - Prefer active, concise sentences.
+
+  avoid_patterns:
+    - Mit grosser Begeisterung
+    - Mit grossem Interesse habe ich Ihre Stellenausschreibung gelesen
+    - spannende Herausforderung
+    - dynamisches Team
+    - innovatives Unternehmen
+    - meine Leidenschaft
+    - ich bin ueberzeugt davon
+    - perfekte Ergaenzung
+    - optimal einbringen
+
+personalization_levels:
+  default: professional
+  conservative:
+    description: Traditional, formal, low-risk wording for regulated or conservative employers.
+  professional:
+    description: Clear, natural, and businesslike wording for most employers.
+  personal:
+    description: More individual voice with slightly more direct motivation and personality.
+
+formatting_preferences:
+  cv:
+    bullet_style: concise
+    summary_length: 3-5 lines
+    skills_grouping: logical_categories
+  cover_letter:
+    length: one_page_or_less
+    opening: relevance_first
+    closing: concise
+
+quality_checks:
+  - Does the text sound like the candidate could plausibly have written it?
+  - Are unsupported claims removed or marked as gaps?
+  - Are important job terms included only where truthful?
+  - Is the tone concrete rather than generic?
