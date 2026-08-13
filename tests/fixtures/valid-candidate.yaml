@@ -1,0 +1,102 @@
+schema_version: 2
+profile:
+  full_name: Erika Beispiel
+  target_titles: [Senior Software Engineer]
+  location: Berlin
+  contact:
+    email: erika@example.test
+    phone: ""
+    linkedin: ""
+    github: ""
+    portfolio: ""
+  work_authorization: EU
+  availability: ""
+sources:
+  - id: source-cv
+    type: cv
+    label: Confirmed CV
+    location: private/cv.pdf
+    verified_at: 2026-08-13
+claims:
+  - id: claim-role
+    category: role
+    statement: Worked as a Senior Software Engineer at Example GmbH.
+    status: verified
+    evidence_refs: [source-cv]
+    allowed_outputs: [cv, cover_letter, email, linkedin, interview]
+    tags: [software engineering]
+    valid_from: "2022-01"
+    valid_to: present
+    notes: ""
+  - id: claim-rabbitmq
+    category: technology
+    statement: Designed event-driven integrations using RabbitMQ.
+    status: verified
+    evidence_refs: [source-cv]
+    allowed_outputs: [cv, cover_letter, email, linkedin, interview]
+    tags: [RabbitMQ, event-driven architecture]
+    valid_from: "2022-01"
+    valid_to: present
+    notes: ""
+  - id: claim-coordination
+    category: leadership
+    statement: Coordinated implementation across frontend and backend developers.
+    status: user_confirmed
+    evidence_refs: []
+    allowed_outputs: [cv, cover_letter, interview]
+    tags: [coordination]
+    valid_from: "2024-01"
+    valid_to: present
+    notes: Confirmed directly by candidate.
+  - id: claim-users
+    category: metric
+    statement: The product served 100,000 users.
+    status: unverified
+    evidence_refs: []
+    allowed_outputs: [cv, cover_letter, interview]
+    tags: [users]
+    valid_from: "2024-01"
+    valid_to: present
+    notes: Requires confirmation.
+experience:
+  - id: experience-example
+    role: Senior Software Engineer
+    company: Example GmbH
+    location: Berlin
+    start_date: "2022-01"
+    end_date: present
+    employment_type: full_time
+    status: verified
+    evidence_refs: [source-cv]
+    claim_ids: [claim-role, claim-rabbitmq, claim-coordination]
+projects: []
+skills:
+  - name: RabbitMQ
+    canonical_name: RabbitMQ
+    aliases: []
+    category: backend
+    level: ""
+    last_used: "2026"
+    status: verified
+    claim_ids: [claim-rabbitmq]
+education: []
+certifications: []
+languages:
+  - language: Deutsch
+    level: Muttersprache
+    status: user_confirmed
+    evidence_refs: []
+    claim_ids: []
+preferences:
+  target_roles: [Senior Software Engineer]
+  target_industries: []
+  preferred_company_types: []
+  avoid_roles: []
+  avoid_industries: []
+  location_preferences: [Berlin, Remote]
+  remote_hybrid_onsite: remote_or_hybrid
+constraints:
+  do_not_claim: []
+  unsupported_or_weak_skills: [Kafka]
+  sensitive_topics_to_avoid: []
+  facts_requiring_user_confirmation: [claim-users]

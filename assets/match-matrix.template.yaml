@@ -1,0 +1,22 @@
+schema_version: 1
+job_title: ""
+matches: []
+# - requirement_id: req-example
+#   priority: must_have
+#   classification: transferable_match
+#   evidence_claim_ids: []
+#   supported_wording: []
+#   forbidden_wording: []
+#   rationale: ""
+coverage:
+  must_have:
+    direct_match: 0
+    transferable_match: 0
+    partial_match: 0
+    gap: 0
+  important:
+    direct_match: 0
+    transferable_match: 0
+    partial_match: 0
+    gap: 0
+unresolved_questions: []

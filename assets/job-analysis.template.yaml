@@ -1,0 +1,19 @@
+schema_version: 1
+job:
+  title: ""
+  seniority: ""
+  company: ""
+  location: ""
+  source: ""
+  language: ""
+requirements: []
+# - id: req-example
+#   original_text: ""
+#   normalized_competency: ""
+#   priority: must_have
+#   category: technology
+#   keywords: []
+#   notes: ""
+responsibilities: []
+company_context: []
+open_questions: []

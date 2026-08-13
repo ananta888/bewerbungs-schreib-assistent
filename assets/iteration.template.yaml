@@ -1,0 +1,37 @@
+schema_version: 1
+mode: standard
+execution: independent_agents
+cycle: 1
+passes:
+  - id: pass-author-1
+    role: author
+    independent_context: true
+    input_revision: source
+    output_revision: revision-1
+    findings: []
+  - id: pass-evidence-ats-1
+    role: evidence_ats_reviewer
+    independent_context: true
+    input_revision: revision-1
+    output_revision: revision-2
+    findings: []
+  - id: pass-recruiter-style-1
+    role: recruiter_style_reviewer
+    independent_context: true
+    input_revision: revision-2
+    output_revision: revision-3
+    findings: []
+  - id: pass-finalizer-1
+    role: finalizer
+    independent_context: true
+    input_revision: revision-3
+    output_revision: final
+    findings: []
+# Finding fields:
+# - id: finding-example
+#   severity: high
+#   category: evidence
+#   description: ""
+#   evidence_refs: []
+#   status: resolved
+#   disposition: ""

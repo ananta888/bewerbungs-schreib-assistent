@@ -1,227 +1,145 @@
 ---
 name: bewerbungs-schreib-assistent
-description: Create, review, and tailor German or English job application materials such as CVs, resumes, cover letters, LinkedIn summaries, ATS reviews, recruiter reviews, candidate/job matching, and interview preparation. Use when the user provides a job description, candidate profile, resume, writing sample, or asks for application documents optimized for ATS, human recruiters, authenticity, and factual accuracy.
+description: Create, review, and tailor truthful German or English CVs, resumes, cover letters, application emails, LinkedIn summaries, ATS reviews, recruiter reviews, candidate/job matches, and interview preparation. Use when a user provides a job advertisement, CV, candidate profile, writing sample, or requests job-specific application material that must remain ATS-readable, evidence-backed, authentic, and free of invented facts.
 ---
 
 # Bewerbungs-Schreib-Assistent
 
-## Core Principle
+Produce application material that passes both the machine filter and the human filter. Preserve factual accuracy, readable language, relevance, and the candidate's voice. Never trade credibility for keyword coverage.
 
-Optimize every application for two filters:
+## Locate and Validate Profiles
 
-1. Machine filter: ATS discoverability.
-2. Human filter: recruiter readability, credibility, relevance, and personality.
+Resolve profile files in this order:
 
-Never improve ATS matching by weakening readability, credibility, or factual accuracy.
+1. Use paths explicitly provided by the user.
+2. Look for `candidate-profile.yaml` and `style-profile.yaml` in the current application project.
+3. Look in a private profile directory explicitly configured by the user.
+4. Use `*.example.yaml` only as schemas. Never treat example content as candidate facts.
 
-## Persistent Profile Files
+When persistent profiles are missing, use only material supplied for the current task. Offer to initialize private profiles with `python scripts/init_profiles.py --target <directory>`. Never overwrite existing profiles without `--force` and explicit user approval.
 
-Before creating or revising application material, look for these files in the skill or project folder:
+Before drafting, run:
 
-- `candidate-profile.yaml`: factual single source of truth for experience, skills, projects, education, certifications, languages, achievements, and constraints.
-- `style-profile.yaml`: durable personal writing style for tone, structure, vocabulary, confidence level, and phrases to prefer or avoid.
+```bash
+python scripts/validate_profiles.py --candidate <candidate-profile.yaml> --style <style-profile.yaml>
+```
 
-Use `candidate-profile.yaml` as the authority for facts. Do not invent unsupported experience, titles, employers, technologies, certifications, dates, metrics, team sizes, or achievements. If the job requires something not supported there or in user-provided material, mark it as a gap or transferable match.
+Stop and report conflicting dates, broken references, duplicate IDs, or invalid statuses. Do not silently repair factual conflicts.
 
-Use `style-profile.yaml` to shape wording. Preserve personality, not spelling mistakes or accidental grammar issues. The style profile overrides generic application-writing conventions unless it would materially harm professionalism or clarity.
+## Apply the Evidence Policy
 
-If either file is missing, infer only from provided material for the current task and suggest creating or updating the missing profile.
+Read [references/evidence-policy.md](references/evidence-policy.md) for every task that creates or changes candidate claims.
 
-## Workflow
+Treat `candidate-profile.yaml` as the factual authority, subject to this precedence order:
 
-### 1. Understand the Target Job
+1. Current explicit user confirmation.
+2. Verified profile claim.
+3. User-confirmed profile claim.
+4. Current source material supplied by the user.
+5. Inference, which must never be presented as fact.
 
-Extract from the job description:
+Use only claims with status `verified` or `user_confirmed` in final application documents. Treat `inferred`, `unverified`, and `do_not_use` as unavailable. Propose profile changes as a patch and wait for confirmation before making them authoritative.
 
-- job title and seniority
-- must-have, important, and nice-to-have requirements
-- required and preferred skills
-- technologies, tools, frameworks, and methods
-- domain knowledge and industry terminology
-- responsibilities and leadership expectations
-- language, certification, and business requirements
-- soft skills
+## Execute the Pipeline
 
-Group keyword clusters by underlying competency instead of blindly copying terms.
+Read [references/pipeline.md](references/pipeline.md) and complete these stages:
 
-Example:
+1. Extract the job into `job-analysis.yaml` using [assets/job-analysis.template.yaml](assets/job-analysis.template.yaml).
+2. Classify each important requirement in `match-matrix.yaml` using [assets/match-matrix.template.yaml](assets/match-matrix.template.yaml).
+3. Ask only high-value questions that could materially change a must-have match, factual accuracy, or document strategy.
+4. Draft an annotated document. Attach `<!-- evidence: claim-id -->` to every factual content line. Use `<!-- evidence: editorial -->` only for non-factual transitions or motivation.
+5. Audit the annotated draft:
 
-`Angular`, `TypeScript`, `RxJS`, and `frontend architecture` can indicate `modern enterprise frontend development`.
+```bash
+python scripts/audit_claims.py --candidate <candidate-profile.yaml> --document <annotated.md> --output-type cv --strict
+```
 
-### 2. Analyze the Candidate
+6. Run the style check:
 
-Extract only supported facts from `candidate-profile.yaml` and any additional user-provided material.
+```bash
+python scripts/check_style.py --style <style-profile.yaml> --document <annotated.md> --document-type cv
+```
 
-Build an internal candidate profile covering:
+7. Run a classical language check as described in [references/language-quality.md](references/language-quality.md). Prefer a local LanguageTool server. Treat suggestions as review findings, not automatic edits.
+8. Execute the iterative review mode from [references/iteration-loop.md](references/iteration-loop.md). Use `standard` unless the user requests speed or maximum rigor.
+9. Re-run claim, style, and language checks after revisions.
+10. Strip internal evidence annotations only after all checks pass:
 
-- professional experience
-- technologies and methods
-- industries and domains
-- projects and responsibilities
-- leadership and collaboration experience
-- achievements
-- education and certifications
-- languages
-- personal strengths
+```bash
+python scripts/audit_claims.py --candidate <candidate-profile.yaml> --document <annotated.md> --output-type cv --strict --strip-to <final.md>
+```
 
-Unsupported requirements are gaps, not claims.
+Use `.application-work/` for intermediate artifacts unless the user requests another location. Do not expose internal evidence annotations in the final document.
 
-### 3. Match Job and Candidate
+## Match Job and Candidate
 
-Create an internal matching matrix for important requirements:
+Classify every `must_have` and `important` requirement as exactly one of:
 
-- `DIRECT MATCH`
-- `TRANSFERABLE MATCH`
-- `PARTIAL MATCH`
-- `GAP`
+- `direct_match`
+- `transferable_match`
+- `partial_match`
+- `gap`
 
-Prefer evidence over claims. Use action, context, and result where possible. Do not invent numerical improvements.
+Back every non-gap classification with claim IDs. Do not convert adjacent experience into direct experience. For example, RabbitMQ plus event-driven architecture can support a transferable Kafka match, but never a Kafka claim.
 
-### 4. Optimize for ATS
+Prefer `Action + Context + Result`. Omit unknown metrics rather than estimating them. Surface gaps honestly and use adjacent evidence only when it helps a recruiter assess transferability.
 
-Use relevant terminology from the job advertisement where it truthfully describes the candidate. Place important terms naturally in:
+## Route to the Relevant Rules
 
-- professional summary
-- skills
-- work experience
-- project descriptions
+- Read [references/ats-rules.md](references/ats-rules.md) for CV creation and ATS review.
+- Read [references/cv-rules.md](references/cv-rules.md) for CVs and resumes.
+- Read [references/cover-letter-rules.md](references/cover-letter-rules.md) for cover letters and short application emails.
+- Read [references/german-style.md](references/german-style.md) for German-language material.
 
-Prefer canonical industry terms and bridge wording when appropriate.
+Load only references relevant to the requested output.
 
-Example:
+## Iterate Through Review Roles
 
-Candidate fact: `automated build and deployment`
+Use separate agents or fresh review contexts when available. Do not pass the author's hidden rationale to reviewers. Give each reviewer the raw job analysis, candidate claims, style profile, current revision, and its role-specific criteria.
 
-Job term: `CI/CD pipelines`
+Validate the review chain before finalization:
 
-Use: `CI/CD pipelines for automated build and deployment`
+```bash
+python scripts/validate_iteration.py --manifest .application-work/iteration.yaml
+```
 
-Avoid keyword stuffing, invisible keywords, fake competencies, huge keyword sections, and excessive repetition.
+Do not describe a sequential same-context review as independent validation. Resolve every critical or high finding, or record an explicit accepted-risk rationale for the user.
 
-### 5. Optimize for Human Readers
+## Apply the Style Profile
 
-Make the first screen answer:
+Use the document-specific section of `style-profile.yaml`. Preserve the candidate's stable voice, not spelling mistakes. Keep factual content identical across `conservative`, `professional`, and `personal`; vary only presentation and tone.
 
-- Who is this person?
-- What is their strongest relevant experience?
-- Why are they relevant for this role?
-- What evidence supports this?
-- What differentiates them?
+When producing multiple tone variants, verify identical evidence sets:
 
-Prioritize relevant information near the beginning. Use concise bullets and plain language.
+```bash
+python scripts/compare_modes.py conservative.md professional.md personal.md
+```
 
-### 6. Apply Personal Style
+Do not imitate generic recruiter language unless the profile explicitly approves it.
 
-Use `style-profile.yaml` to control:
+## Return a Transparent Result
 
-- language
-- directness
-- formality
-- sentence length
-- technical depth
-- confidence and self-promotion
-- humor
-- vocabulary
-- preferred and avoided phrases
+Alongside the requested document, report concisely:
 
-Avoid stereotypical AI or generic application language unless the style profile explicitly supports it.
+- strongest direct matches
+- transferable matches
+- material gaps
+- facts that still require confirmation
+- profile updates worth considering
 
-Common German phrases to avoid by default:
+Never provide a fabricated ATS percentage. Report requirement coverage by category instead.
 
-- `Mit grosser Begeisterung`
-- `Mit grossem Interesse habe ich Ihre Stellenausschreibung gelesen`
-- `spannende Herausforderung`
-- `dynamisches Team`
-- `innovatives Unternehmen`
-- `meine Leidenschaft`
-- `ich bin ueberzeugt davon`
-- `perfekte Ergaenzung`
-- `optimal einbringen`
+## Final Quality Gate
 
-Prefer concrete, slightly individual wording.
+Before returning final material, verify:
 
-## Default CV Structure
-
-Use this structure unless the user requests another format:
-
-1. Header: name, target professional title, contact details, location, relevant links.
-2. Professional Summary: 3-5 lines with identity, strongest experience, relevant technologies or domain, and distinguishing strength.
-3. Core Skills: grouped logically.
-4. Professional Experience: role, company, dates, context sentence if needed, and 3-6 relevant bullets.
-5. Projects: only when they demonstrate skills not obvious from employment history.
-6. Education.
-7. Certifications.
-8. Languages.
-
-Most relevant experience gets the most detail. Irrelevant experience is shortened.
-
-## Bullet Rules
-
-Prefer:
-
-`Verb + object + technical/business context + outcome`
-
-Examples:
-
-- Designed Angular components for a configurable enterprise workflow system.
-- Introduced reusable TypeScript libraries shared across multiple frontend applications.
-- Integrated REST APIs and asynchronous event streams into Angular applications using RxJS.
-
-Avoid repeating `Developed`, `Implemented`, or `Responsible for`.
-
-## Cover Letter Rules
-
-The cover letter must add information instead of repeating the CV.
-
-Use this structure:
-
-1. Opening: establish relevance immediately.
-2. Why this role: connect role requirements to supported candidate experience.
-3. Evidence: include 1-3 strong examples.
-4. Motivation: explain why the role or company makes sense without pretending deep emotional attachment.
-5. Closing: professional and concise.
-
-## Personalization Levels
-
-Support three modes:
-
-- `conservative`: traditional and safe for public sector, banks, regulated industries, and traditional corporations.
-- `professional`: default; professional, natural, and suitable for most companies.
-- `personal`: more individual voice for startups, modern tech companies, creative environments, or direct hiring-manager applications.
-
-Keep factual content identical across modes. Change only presentation and tone.
-
-## Review Outputs
-
-For ATS reviews, use:
-
-- Strong matches
-- Transferable matches
-- Missing or weak
-- Keywords worth adding
-- Keywords not justified by the candidate profile
-
-For human reviews, use:
-
-- First impression
-- Strongest selling point
-- Potential concern
-- Hard to understand
-- Too generic
-- Most convincing evidence
-
-Never recommend adding unsupported skills.
-
-## Quality Gate
-
-Before returning final application material, verify:
-
-- facts are supported by `candidate-profile.yaml` or user-provided material
-- dates and technologies are consistent
-- important job terminology appears naturally
-- headings and skill groups are ATS-readable
+- every factual statement maps to allowed evidence
+- no dates, titles, employers, technologies, metrics, certifications, or team sizes were invented
+- important job terminology appears naturally where supported
+- unsupported keywords remain excluded
 - strongest relevant information appears early
-- bullets are concise and evidence-based
-- style matches `style-profile.yaml`
-- text avoids obvious AI language
-- gaps are handled honestly
+- output follows ATS-safe structure and document-specific rules
+- tone matches the style profile and avoids generic AI phrasing
+- factual evidence is identical across personalization modes
+- classical language checks were run or their unavailability was disclosed
+- critical and high review findings were resolved or explicitly accepted

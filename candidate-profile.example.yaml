@@ -1,0 +1,92 @@
+# Copy this file to candidate-profile.yaml in a private application workspace.
+# Only store facts that are true, supportable, and safe to reuse.
+
+schema_version: 2
+
+profile:
+  full_name: ""
+  target_titles: []
+  location: ""
+  contact:
+    email: ""
+    phone: ""
+    linkedin: ""
+    github: ""
+    portfolio: ""
+  work_authorization: ""
+  availability: ""
+
+sources: []
+# Example source:
+# - id: source-cv-2026
+#   type: cv
+#   label: CV confirmed by candidate
+#   location: private/cv-2026.pdf
+#   verified_at: 2026-08-13
+
+claims: []
+# Example claim:
+# - id: claim-event-driven-systems
+#   category: technology
+#   statement: Designed event-driven integrations using RabbitMQ.
+#   status: verified
+#   evidence_refs: [source-cv-2026]
+#   allowed_outputs: [cv, cover_letter, email, linkedin, interview]
+#   tags: [RabbitMQ, event-driven architecture]
+#   valid_from: "2022-01"
+#   valid_to: present
+#   notes: ""
+
+experience: []
+# Example experience:
+# - id: experience-example-company
+#   role: Senior Software Engineer
+#   company: Example Company
+#   location: Berlin
+#   start_date: "2022-01"
+#   end_date: present
+#   employment_type: full_time
+#   status: verified
+#   evidence_refs: [source-cv-2026]
+#   claim_ids: [claim-event-driven-systems]
+
+projects: []
+# Example project fields: id, name, role, context, start_date, end_date,
+# status, evidence_refs, claim_ids, links.
+
+skills: []
+# Example skill:
+# - name: RabbitMQ
+#   canonical_name: RabbitMQ
+#   aliases: []
+#   category: backend
+#   level: ""
+#   last_used: "2026"
+#   status: verified
+#   claim_ids: [claim-event-driven-systems]
+
+education: []
+# Example education fields: id, degree, institution, location, start_date,
+# end_date, status, evidence_refs, claim_ids.
+
+certifications: []
+# Example certification fields: id, name, issuer, issue_date, expiry_date,
+# credential_url, status, evidence_refs, claim_ids.
+
+languages: []
+# Example language fields: language, level, status, evidence_refs, claim_ids.
+
+preferences:
+  target_roles: []
+  target_industries: []
+  preferred_company_types: []
+  avoid_roles: []
+  avoid_industries: []
+  location_preferences: []
+  remote_hybrid_onsite: ""
+
+constraints:
+  do_not_claim: []
+  unsupported_or_weak_skills: []
+  sensitive_topics_to_avoid: []
+  facts_requiring_user_confirmation: []

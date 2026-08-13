@@ -1,0 +1,55 @@
+schema_version: 2
+style_profile:
+  language: de
+  locale: de-DE
+  tone: direct
+  formality: professional_relaxed
+  directness: high
+  sentence_length: short_to_medium
+  technical_depth: high
+  enthusiasm: restrained
+  self_promotion: moderate
+  humor: minimal
+  vocabulary:
+    prefer: [konkrete Beispiele]
+    avoid: [Marketingsprache]
+  preferred_patterns: [Mit Relevanz beginnen.]
+  avoid_patterns:
+    - Mit großer Begeisterung
+    - spannende Herausforderung
+    - dynamisches Team
+    - innovatives Unternehmen
+    - meine Leidenschaft
+    - ich bin überzeugt davon
+    - perfekte Ergänzung
+    - optimal einbringen
+document_styles:
+  cv:
+    max_sentence_words: 28
+  cover_letter:
+    max_sentence_words: 32
+  email:
+    max_sentence_words: 28
+  linkedin:
+    max_sentence_words: 30
+personalization_levels:
+  default: professional
+  conservative: {description: Formell}
+  professional: {description: Natürlich}
+  personal: {description: Persönlich}
+approved_examples: []
+rejected_examples: []
+quality_thresholds:
+  max_repeated_sentence_starts: 2
+  max_avoid_pattern_matches: 0
+review_workflow:
+  default_mode: standard
+  max_revision_cycles: 2
+  prefer_independent_agents: true
+language_quality:
+  primary_backend: languagetool
+  language: de-DE
+  local_server: http://localhost:8010/v2/check
+  hunspell_dictionary: de_DE
+  allow_remote_service: false
+  allowlist: [RabbitMQ]
