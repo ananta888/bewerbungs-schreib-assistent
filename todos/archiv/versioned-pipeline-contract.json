@@ -1,0 +1,38 @@
+{
+  "$schema": "../todo.track.schema.json",
+  "version": 1,
+  "owner": "bewerbungs-schreib-assistent",
+  "track": "versioned-pipeline-contract",
+  "created": "2026-08-13",
+  "updated": "2026-08-14",
+  "purpose": "Die evidenzbasierte Pipeline über einen stabilen lokalen Maschinenvertrag integrierbar machen.",
+  "goal": "Capabilities, Laufstatus, Findings und Artefakte können ohne Duplikation der Evidence Policy orchestriert werden.",
+  "status_scale": ["todo", "in_progress", "partial", "blocked", "done"],
+  "priority_scale": ["low", "medium", "high"],
+  "risk_scale": ["low", "medium", "high"],
+  "milestones": [
+    { "id": "M1", "title": "Maschinenvertrag", "task_ids": ["VPC-01", "VPC-02"], "status": "done" }
+  ],
+  "tasks": [
+    {
+      "id": "VPC-01", "title": "Capabilities und Status bereitstellen", "status": "done", "priority": "high", "risk": "medium", "progress_percent": 100,
+      "acceptance_criteria": ["Lokale CLI meldet Version, Stufen, Policygrenzen, Laufstatus und Artefaktreferenzen als JSON."]
+    },
+    {
+      "id": "VPC-02", "title": "Alle Pipelinestufen strukturiert orchestrierbar machen", "status": "done", "priority": "high", "risk": "high", "progress_percent": 100,
+      "acceptance_criteria": ["Analyse, Match-Matrix, Draft, Review, Audit und Finalisierung liefern strukturierte Ergebnisse und sichere Fehler."]
+    }
+  ],
+  "critical_path_tasks": ["VPC-01", "VPC-02"],
+  "tasks_status_summary": {
+    "total": 2,
+    "by_status": { "todo": 0, "in_progress": 0, "partial": 0, "blocked": 0, "done": 2 },
+    "progress_percent_done": 100,
+    "by_priority": { "high": 2, "medium": 0, "low": 0 },
+    "by_risk": { "high": 1, "medium": 1, "low": 0 },
+    "critical_path": { "total": 2, "done": 2, "remaining": 0 },
+    "milestones": { "total": 1, "todo": 0, "in_progress": 0, "blocked": 0, "done": 1 }
+  },
+  "progress_summary": { "state": "done", "todo_remaining": 0, "in_progress": 0, "partial": 0, "blocked": 0, "done": 2 },
+  "summary_notes": ["Evidence-, ATS-, Stil- und Reviewregeln bleiben in SKILL.md und references autoritativ."]
+}
