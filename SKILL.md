@@ -26,6 +26,28 @@ python scripts/validate_profiles.py --candidate <candidate-profile.yaml> --style
 
 Stop and report conflicting dates, broken references, duplicate IDs, or invalid statuses. Do not silently repair factual conflicts.
 
+When an existing CV in HTML, PDF, DOCX, or ODT form is supplied, read
+[references/cv-import-contract.md](references/cv-import-contract.md) and create a versioned import
+proposal with `scripts/cv_import_contract.py`. Keep it under `.application-work/`. Show its
+extraction warnings, conflicts, employment periods, and atomic claims to the candidate. Do not
+merge the proposal into `candidate-profile.yaml` and do not upgrade any imported status until the
+candidate explicitly confirms the affected facts.
+
+If the root application offers optional AI-assisted CV structuring, keep the provider call outside
+this submodule and require explicit user opt-in. Validate the provider output with the closed
+`ai-cv-structure-proposal` contract from [references/cv-import-contract.md](references/cv-import-contract.md).
+Apply only explicitly selected, exact-source-anchored suggestions through
+`cv_import_contract.py apply-ai-structure`. Provider confidence is review metadata, never evidence;
+all applied facts remain `unverified` until the candidate confirms them individually.
+
+When the user explicitly chooses a complete AI recognition version instead of individual legacy
+suggestions, use `cv_import_contract.py materialize-ai-structure`. This mode revalidates the entire
+provider proposal, selects every mergeable non-null primary suggestion, and replaces the
+deterministically recognized experience, education, project, skill, language, and additional-fact
+view. It does not select alternatives or null suggestions. The resulting facts remain
+`unverified`, are recognition evidence only, and still require individual candidate confirmation;
+the command never mutates a candidate profile or makes a claim publishable.
+
 ## Apply the Evidence Policy
 
 Read [references/evidence-policy.md](references/evidence-policy.md) for every task that creates or changes candidate claims.

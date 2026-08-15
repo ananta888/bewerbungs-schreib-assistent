@@ -1,0 +1,275 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bewerbung.local/contracts/v1/ai-cv-structure-proposal.schema.json",
+  "title": "AI-assisted CV structure proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "contract_version",
+    "status",
+    "binding",
+    "sections",
+    "employment",
+    "education",
+    "projects",
+    "skills",
+    "languages"
+  ],
+  "properties": {
+    "contract": { "const": "ai-cv-structure-proposal" },
+    "contract_version": { "const": "1.0" },
+    "status": { "const": "unverified" },
+    "binding": { "$ref": "#/$defs/binding" },
+    "sections": {
+      "type": "array",
+      "maxItems": 250,
+      "items": { "$ref": "#/$defs/section" }
+    },
+    "employment": {
+      "type": "array",
+      "maxItems": 250,
+      "items": { "$ref": "#/$defs/employment" }
+    },
+    "education": {
+      "type": "array",
+      "maxItems": 250,
+      "items": { "$ref": "#/$defs/education" }
+    },
+    "projects": {
+      "type": "array",
+      "maxItems": 250,
+      "items": { "$ref": "#/$defs/project" }
+    },
+    "skills": {
+      "type": "array",
+      "maxItems": 250,
+      "items": { "$ref": "#/$defs/fieldSuggestion" }
+    },
+    "languages": {
+      "type": "array",
+      "maxItems": 250,
+      "items": { "$ref": "#/$defs/language" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "source_sha256",
+        "text_sha256",
+        "base_proposal_sha256"
+      ],
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^source-cv-[a-f0-9]{16}$"
+        },
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "text_sha256": { "$ref": "#/$defs/sha256" },
+        "base_proposal_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "anchor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "line_start",
+        "line_end",
+        "char_start",
+        "char_end",
+        "quote"
+      ],
+      "properties": {
+        "line_start": { "type": "integer", "minimum": 1 },
+        "line_end": { "type": "integer", "minimum": 1 },
+        "char_start": { "type": "integer", "minimum": 0 },
+        "char_end": { "type": "integer", "minimum": 1 },
+        "quote": { "type": "string", "minLength": 1, "maxLength": 5000 }
+      }
+    },
+    "alternative": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "source_anchor", "confidence"],
+      "properties": {
+        "value": { "type": "string", "minLength": 1, "maxLength": 5000 },
+        "source_anchor": { "$ref": "#/$defs/anchor" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "fieldSuggestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "value",
+        "source_anchor",
+        "confidence",
+        "alternatives",
+        "questions",
+        "status"
+      ],
+      "properties": {
+        "value": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 5000 },
+            { "type": "null" }
+          ]
+        },
+        "source_anchor": {
+          "oneOf": [
+            { "$ref": "#/$defs/anchor" },
+            { "type": "null" }
+          ]
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "alternatives": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/alternative" }
+        },
+        "questions": {
+          "type": "array",
+          "maxItems": 10,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
+        "status": { "const": "unverified" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "value": { "type": "null" } } },
+          "then": {
+            "properties": {
+              "source_anchor": { "type": "null" },
+              "confidence": { "const": 0 },
+              "questions": { "minItems": 1 }
+            }
+          },
+          "else": {
+            "properties": {
+              "source_anchor": { "$ref": "#/$defs/anchor" }
+            }
+          }
+        }
+      ]
+    },
+    "section": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "heading", "status"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "profile",
+            "employment",
+            "education",
+            "projects",
+            "skills",
+            "languages",
+            "other"
+          ]
+        },
+        "heading": { "$ref": "#/$defs/fieldSuggestion" },
+        "status": { "const": "unverified" }
+      }
+    },
+    "employment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "employer",
+        "role",
+        "start_date",
+        "end_date",
+        "location",
+        "details",
+        "status"
+      ],
+      "properties": {
+        "employer": { "$ref": "#/$defs/fieldSuggestion" },
+        "role": { "$ref": "#/$defs/fieldSuggestion" },
+        "start_date": { "$ref": "#/$defs/fieldSuggestion" },
+        "end_date": { "$ref": "#/$defs/fieldSuggestion" },
+        "location": { "$ref": "#/$defs/fieldSuggestion" },
+        "details": {
+          "type": "array",
+          "maxItems": 250,
+          "items": { "$ref": "#/$defs/fieldSuggestion" }
+        },
+        "status": { "const": "unverified" }
+      }
+    },
+    "education": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "institution",
+        "qualification",
+        "start_date",
+        "end_date",
+        "location",
+        "details",
+        "status"
+      ],
+      "properties": {
+        "institution": { "$ref": "#/$defs/fieldSuggestion" },
+        "qualification": { "$ref": "#/$defs/fieldSuggestion" },
+        "start_date": { "$ref": "#/$defs/fieldSuggestion" },
+        "end_date": { "$ref": "#/$defs/fieldSuggestion" },
+        "location": { "$ref": "#/$defs/fieldSuggestion" },
+        "details": {
+          "type": "array",
+          "maxItems": 250,
+          "items": { "$ref": "#/$defs/fieldSuggestion" }
+        },
+        "status": { "const": "unverified" }
+      }
+    },
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "role",
+        "start_date",
+        "end_date",
+        "details",
+        "technologies",
+        "status"
+      ],
+      "properties": {
+        "name": { "$ref": "#/$defs/fieldSuggestion" },
+        "role": { "$ref": "#/$defs/fieldSuggestion" },
+        "start_date": { "$ref": "#/$defs/fieldSuggestion" },
+        "end_date": { "$ref": "#/$defs/fieldSuggestion" },
+        "details": {
+          "type": "array",
+          "maxItems": 250,
+          "items": { "$ref": "#/$defs/fieldSuggestion" }
+        },
+        "technologies": {
+          "type": "array",
+          "maxItems": 250,
+          "items": { "$ref": "#/$defs/fieldSuggestion" }
+        },
+        "status": { "const": "unverified" }
+      }
+    },
+    "language": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "level", "status"],
+      "properties": {
+        "language": { "$ref": "#/$defs/fieldSuggestion" },
+        "level": { "$ref": "#/$defs/fieldSuggestion" },
+        "status": { "const": "unverified" }
+      }
+    }
+  }
+}

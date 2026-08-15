@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import subprocess
 import sys
@@ -280,6 +281,7 @@ class ProfileContractTests(unittest.TestCase):
                     }
                 ],
                 True,
+                hashlib.sha256(target.read_bytes()).hexdigest(),
             )
             candidate = load_yaml(target)
             claim = next(
@@ -314,6 +316,7 @@ class ProfileContractTests(unittest.TestCase):
                         }
                     ],
                     False,
+                    hashlib.sha256(target.read_bytes()).hexdigest(),
                 )
 
     def test_valid_patch_is_atomic_and_revalidated(self) -> None:
@@ -333,6 +336,7 @@ class ProfileContractTests(unittest.TestCase):
                     }
                 ],
                 True,
+                hashlib.sha256(target.read_bytes()).hexdigest(),
             )
             self.assertEqual(result["status"], "updated")
             self.assertTrue(result["history_recorded"])

@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import os
 import re
-import tempfile
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 try:
     from .common import format_errors, load_yaml, validate_candidate
+    from .cv_import_contract import (
+        ImportContractError,
+        _candidate_digest,
+        _commit_candidate_profile_locked,
+        _exclusive_profile_lock,
+        _recover_incomplete_intents,
+    )
 except ImportError:
     from common import format_errors, load_yaml, validate_candidate
+    from cv_import_contract import (
+        ImportContractError,
+        _candidate_digest,
+        _commit_candidate_profile_locked,
+        _exclusive_profile_lock,
+        _recover_incomplete_intents,
+    )
 
 
 ALLOWED_CLAIM_FIELDS = {
@@ -166,135 +175,176 @@ def profile_summary(candidate_path: str | Path) -> dict[str, Any]:
 
 
 def apply_claim_patch(
-    candidate_path: str | Path, operations: list[dict[str, Any]], confirmed: bool
+    candidate_path: str | Path,
+    operations: list[dict[str, Any]],
+    confirmed: bool,
+    expected_candidate_sha256: str,
 ) -> dict[str, Any]:
     path = Path(candidate_path)
-    before_bytes = path.read_bytes()
-    candidate = load_yaml(path)
-    claims = {
-        claim.get("id"): claim
-        for claim in candidate.get("claims", [])
-        if isinstance(claim, dict)
-    }
-    for operation in operations:
-        claim_id = operation.get("claim_id")
-        field = operation.get("field")
-        if claim_id not in claims:
-            raise ValueError(f"Unknown claim: {claim_id!r}")
-        if field not in ALLOWED_CLAIM_FIELDS:
-            raise ValueError(f"Field cannot be patched: {field!r}")
-        value = operation.get("value")
-        if field == "status" and value in PUBLISHABLE_STATUSES and not confirmed:
-            raise ValueError(
-                "Publishable claim status requires explicit user confirmation"
+    with _exclusive_profile_lock(path):
+        before_sha256 = _candidate_digest(path)
+        recovered = _recover_incomplete_intents(path, before_sha256)
+        before_sha256 = _candidate_digest(path)
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", expected_candidate_sha256)
+            or before_sha256 != expected_candidate_sha256
+        ):
+            raise ImportContractError(
+                "cas_mismatch", "Candidate profile changed since it was loaded"
             )
-        claims[claim_id][field] = value
-    errors = validate_candidate(candidate)
-    if errors:
-        raise ValueError(format_errors(errors))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            yaml.safe_dump(candidate, stream, allow_unicode=True, sort_keys=False)
-        os.replace(temporary_name, path)
-    except Exception:
-        Path(temporary_name).unlink(missing_ok=True)
-        raise
-    updated_claim_ids = sorted({str(item["claim_id"]) for item in operations})
-    history = {
-        "occurred_at": datetime.now(timezone.utc).isoformat(),
-        "claim_ids": updated_claim_ids,
-        "fields": sorted({str(item["field"]) for item in operations}),
-        "before_sha256": hashlib.sha256(before_bytes).hexdigest(),
-        "after_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "explicitly_confirmed": confirmed,
-        "confirmation_origin": "explicit_local_user_action"
-        if confirmed
-        else "not_required",
-    }
-    history_path = path.with_suffix(path.suffix + ".history.jsonl")
-    with history_path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps(history, ensure_ascii=False) + "\n")
-    return {
-        "status": "updated",
-        "updated_claim_ids": updated_claim_ids,
-        "history_recorded": True,
-    }
+        candidate = load_yaml(path)
+        claims = {
+            claim.get("id"): claim
+            for claim in candidate.get("claims", [])
+            if isinstance(claim, dict)
+        }
+        for operation in operations:
+            claim_id = operation.get("claim_id")
+            field = operation.get("field")
+            if claim_id not in claims:
+                raise ValueError(f"Unknown claim: {claim_id!r}")
+            if field not in ALLOWED_CLAIM_FIELDS:
+                raise ValueError(f"Field cannot be patched: {field!r}")
+            value = operation.get("value")
+            if (
+                field == "status"
+                and value in PUBLISHABLE_STATUSES
+                and not confirmed
+            ):
+                raise ValueError(
+                    "Publishable claim status requires explicit user confirmation"
+                )
+            claims[claim_id][field] = value
+        errors = validate_candidate(candidate)
+        if errors:
+            raise ValueError(format_errors(errors))
+        updated_claim_ids = sorted({str(item["claim_id"]) for item in operations})
+        after_sha256, transaction_id = _commit_candidate_profile_locked(
+            path,
+            expected_candidate_sha256,
+            before_sha256,
+            candidate,
+            "patch_candidate_claims",
+            {
+                "claim_ids": updated_claim_ids,
+                "fields": sorted({str(item["field"]) for item in operations}),
+                "explicitly_confirmed": confirmed,
+                "confirmation_origin": "explicit_local_user_action"
+                if confirmed
+                else "not_required",
+            },
+        )
+        return {
+            "status": "updated",
+            "updated_claim_ids": updated_claim_ids,
+            "candidate_sha256": after_sha256,
+            "transaction_id": transaction_id,
+            "recovered_transaction_ids": recovered,
+            "history_recorded": True,
+        }
 
 
 def add_import_proposals(
-    candidate_path: str | Path, proposals: list[dict[str, Any]], confirmed: bool
+    candidate_path: str | Path,
+    proposals: list[dict[str, Any]],
+    confirmed: bool,
+    expected_candidate_sha256: str,
 ) -> dict[str, Any]:
     if not confirmed:
         raise ValueError("Import proposals require explicit user confirmation")
     path = Path(candidate_path)
-    candidate = load_yaml(path)
-    known = {
-        claim.get("id")
-        for claim in candidate.get("claims", [])
-        if isinstance(claim, dict)
-    }
-    added: list[str] = []
-    for proposal in proposals:
-        claim_id = str(proposal.get("id", ""))
-        statement = str(proposal.get("statement", "")).strip()
-        sha256 = str(proposal.get("sha256", ""))
-        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", claim_id) or claim_id in known:
-            raise ValueError(f"Invalid or duplicate claim id: {claim_id!r}")
-        if not statement or not re.fullmatch(r"[a-f0-9]{64}", sha256):
-            raise ValueError("Import proposal requires statement and sha256 provenance")
-        source_id = f"source-import-{sha256[:12]}"
-        if not any(
-            item.get("id") == source_id for item in candidate.get("sources", [])
+    with _exclusive_profile_lock(path):
+        before_sha256 = _candidate_digest(path)
+        recovered = _recover_incomplete_intents(path, before_sha256)
+        before_sha256 = _candidate_digest(path)
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", expected_candidate_sha256)
+            or before_sha256 != expected_candidate_sha256
         ):
-            candidate["sources"].append(
+            raise ImportContractError(
+                "cas_mismatch", "Candidate profile changed since it was loaded"
+            )
+        candidate = load_yaml(path)
+        known = {
+            claim.get("id")
+            for claim in candidate.get("claims", [])
+            if isinstance(claim, dict)
+        }
+        added: list[str] = []
+        proposal_hashes: set[str] = set()
+        for proposal in proposals:
+            claim_id = str(proposal.get("id", ""))
+            statement = str(proposal.get("statement", "")).strip()
+            sha256 = str(proposal.get("sha256", ""))
+            if (
+                not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", claim_id)
+                or claim_id in known
+            ):
+                raise ValueError(f"Invalid or duplicate claim id: {claim_id!r}")
+            if not statement or not re.fullmatch(r"[a-f0-9]{64}", sha256):
+                raise ValueError(
+                    "Import proposal requires statement and sha256 provenance"
+                )
+            proposal_hashes.add(sha256)
+            source_id = f"source-import-{sha256[:12]}"
+            if not any(
+                item.get("id") == source_id for item in candidate.get("sources", [])
+            ):
+                candidate["sources"].append(
+                    {
+                        "id": source_id,
+                        "type": "user_import",
+                        "label": "User-confirmed import",
+                        "location": f"sha256:{sha256}",
+                        "verified_at": datetime.now(timezone.utc).date().isoformat(),
+                    }
+                )
+            candidate["claims"].append(
                 {
-                    "id": source_id,
-                    "type": "user_import",
-                    "label": "User-confirmed import",
-                    "location": f"sha256:{sha256}",
-                    "verified_at": datetime.now(timezone.utc).date().isoformat(),
+                    "id": claim_id,
+                    "category": "imported_proposal",
+                    "statement": statement,
+                    "status": "unverified",
+                    "evidence_refs": [source_id],
+                    "allowed_outputs": [
+                        "cv",
+                        "cover_letter",
+                        "email",
+                        "linkedin",
+                        "interview",
+                    ],
+                    "tags": [],
+                    "valid_from": None,
+                    "valid_to": None,
+                    "notes": "Imported and explicitly accepted as an unverified proposal.",
                 }
             )
-        candidate["claims"].append(
+            known.add(claim_id)
+            added.append(claim_id)
+        errors = validate_candidate(candidate)
+        if errors:
+            raise ValueError(format_errors(errors))
+        after_sha256, transaction_id = _commit_candidate_profile_locked(
+            path,
+            expected_candidate_sha256,
+            before_sha256,
+            candidate,
+            "add_candidate_import_proposals",
             {
-                "id": claim_id,
-                "category": "imported_proposal",
-                "statement": statement,
-                "status": "unverified",
-                "evidence_refs": [source_id],
-                "allowed_outputs": [
-                    "cv",
-                    "cover_letter",
-                    "email",
-                    "linkedin",
-                    "interview",
-                ],
-                "tags": [],
-                "valid_from": None,
-                "valid_to": None,
-                "notes": "Imported and explicitly accepted as an unverified proposal.",
-            }
+                "claim_ids": sorted(added),
+                "proposal_sha256_values": sorted(proposal_hashes),
+                "explicitly_confirmed": True,
+                "confirmation_origin": "explicit_local_user_action",
+            },
         )
-        known.add(claim_id)
-        added.append(claim_id)
-    errors = validate_candidate(candidate)
-    if errors:
-        raise ValueError(format_errors(errors))
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            yaml.safe_dump(candidate, stream, allow_unicode=True, sort_keys=False)
-        os.replace(temporary_name, path)
-    except Exception:
-        Path(temporary_name).unlink(missing_ok=True)
-        raise
-    return {"status": "added_unverified", "added_claim_ids": added}
+        return {
+            "status": "added_unverified",
+            "added_claim_ids": added,
+            "candidate_sha256": after_sha256,
+            "transaction_id": transaction_id,
+            "recovered_transaction_ids": recovered,
+            "history_recorded": True,
+        }
 
 
 def main() -> int:
@@ -308,23 +358,61 @@ def main() -> int:
     patch.add_argument("--candidate", required=True)
     patch.add_argument("--operations", required=True)
     patch.add_argument("--confirmed", action="store_true")
+    patch.add_argument("--expected-candidate-sha256", required=True)
     add = subparsers.add_parser("add-import")
     add.add_argument("--candidate", required=True)
     add.add_argument("--proposals", required=True)
     add.add_argument("--confirmed", action="store_true")
+    add.add_argument("--expected-candidate-sha256", required=True)
     args = parser.parse_args()
-    if args.command == "show":
-        result = profile_summary(args.candidate)
-    elif args.command == "patch":
-        operations = json.loads(Path(args.operations).read_text(encoding="utf-8"))
-        if not isinstance(operations, list):
-            raise ValueError("Operations must be a JSON list")
-        result = apply_claim_patch(args.candidate, operations, args.confirmed)
-    else:
-        proposals = json.loads(Path(args.proposals).read_text(encoding="utf-8"))
-        if not isinstance(proposals, list):
-            raise ValueError("Proposals must be a JSON list")
-        result = add_import_proposals(args.candidate, proposals, args.confirmed)
+    try:
+        if args.command == "show":
+            result = profile_summary(args.candidate)
+        elif args.command == "patch":
+            operations = json.loads(Path(args.operations).read_text(encoding="utf-8"))
+            if not isinstance(operations, list):
+                raise ValueError("Operations must be a JSON list")
+            result = apply_claim_patch(
+                args.candidate,
+                operations,
+                args.confirmed,
+                args.expected_candidate_sha256,
+            )
+        else:
+            proposals = json.loads(Path(args.proposals).read_text(encoding="utf-8"))
+            if not isinstance(proposals, list):
+                raise ValueError("Proposals must be a JSON list")
+            result = add_import_proposals(
+                args.candidate,
+                proposals,
+                args.confirmed,
+                args.expected_candidate_sha256,
+            )
+    except ImportContractError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": "rejected",
+                    "error": {"code": exc.code, "safe_detail": exc.detail},
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2
+    except (OSError, ValueError, json.JSONDecodeError):
+        print(
+            json.dumps(
+                {
+                    "status": "rejected",
+                    "error": {
+                        "code": "candidate_profile_mutation_rejected",
+                        "safe_detail": "Candidate profile request is invalid",
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 2
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 

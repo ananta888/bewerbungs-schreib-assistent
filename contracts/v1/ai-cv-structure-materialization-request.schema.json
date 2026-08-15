@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bewerbung.local/contracts/v1/ai-cv-structure-materialization-request.schema.json",
+  "title": "AI-assisted CV recognition-version materialization request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "contract_version",
+    "base_proposal",
+    "expected_proposal_sha256",
+    "ai_proposal"
+  ],
+  "properties": {
+    "contract": { "const": "ai-cv-structure-materialization-request" },
+    "contract_version": { "const": "1.0" },
+    "base_proposal": { "type": "object" },
+    "expected_proposal_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "ai_proposal": { "$ref": "ai-cv-structure-proposal.schema.json" }
+  }
+}
