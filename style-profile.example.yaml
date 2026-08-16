@@ -63,6 +63,8 @@ document_styles:
     perspective: first_person
     self_promotion: moderate
     personal_context: allowed
+    # Required for every document type; a missing value rejects the whole profile.
+    technical_density: medium
     max_sentence_words: 30
 
 personalization_levels:
