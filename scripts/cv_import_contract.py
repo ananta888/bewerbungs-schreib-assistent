@@ -51,6 +51,9 @@ MAX_COMPRESSION_RATIO = 100
 PDF_TIMEOUT_SECONDS = 20
 PROFILE_LOCK_WAIT_SECONDS = 5.0
 PROFILE_LOCK_STALE_SECONDS = 300.0
+MAX_PROFILE_SNAPSHOTS = 50
+MAX_PROFILE_SNAPSHOT_BYTES = 4 * 1024 * 1024
+PROFILE_SNAPSHOT_LABEL_MAX = 120
 ALLOWED_EXTENSIONS = {".html", ".htm", ".pdf", ".docx", ".odt"}
 ALLOWED_MEDIA_TYPES = {
     ".html": "text/html",
@@ -195,6 +198,11 @@ def capabilities() -> dict[str, Any]:
             "extend-user-facts",
             "validate",
             "adopt-confirmed",
+            "revoke-claims",
+            "list-adoptions",
+            "capture-profile-snapshot",
+            "list-profile-snapshots",
+            "restore-profile-snapshot",
             "recovery-status",
             "validate-ai-structure",
             "apply-ai-structure",
@@ -2868,7 +2876,7 @@ def _history_path(candidate_path: Path) -> Path:
     return candidate_path.with_suffix(candidate_path.suffix + ".history.jsonl")
 
 
-def _append_history_record(path: Path, record: dict[str, Any]) -> None:
+def _append_jsonl_record(path: Path, record: dict[str, Any], error_code: str, error_detail: str) -> None:
     payload = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode()
     try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
@@ -2877,15 +2885,22 @@ def _append_history_record(path: Path, record: dict[str, Any]) -> None:
             while offset < len(payload):
                 written = os.write(descriptor, payload[offset:])
                 if written <= 0:
-                    raise OSError("history append made no progress")
+                    raise OSError("append made no progress")
                 offset += written
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
     except OSError as exc:
-        raise ImportContractError(
-            "history_write_failed", "Candidate history could not be durably written"
-        ) from exc
+        raise ImportContractError(error_code, error_detail) from exc
+
+
+def _append_history_record(path: Path, record: dict[str, Any]) -> None:
+    _append_jsonl_record(
+        path,
+        record,
+        "history_write_failed",
+        "Candidate history could not be durably written",
+    )
 
 
 def _fsync_parent_directory(path: Path) -> None:
@@ -3152,6 +3167,569 @@ def _commit_candidate_profile_locked(
     return actual_after, transaction_id
 
 
+def _append_snapshot_index_record(path: Path, record: dict[str, Any]) -> None:
+    """Snapshot bookkeeping is a separate ledger from the candidate history."""
+    _append_jsonl_record(
+        path,
+        record,
+        "snapshot_write_failed",
+        "Profile snapshot index could not be durably written",
+    )
+
+
+def _snapshot_root(candidate_path: Path) -> Path:
+    return candidate_path.with_suffix(candidate_path.suffix + ".snapshots")
+
+
+def _snapshot_index_path(candidate_path: Path) -> Path:
+    return _snapshot_root(candidate_path) / "index.jsonl"
+
+
+def _snapshot_content_path(candidate_path: Path, snapshot_id: str) -> Path:
+    if not re.fullmatch(r"profile-snapshot-[a-f0-9]{16}", snapshot_id):
+        raise ImportContractError(
+            "invalid_snapshot", "Snapshot ID is not a valid profile snapshot ID"
+        )
+    return _snapshot_root(candidate_path) / f"{snapshot_id}.yaml"
+
+
+def _read_snapshot_index(candidate_path: Path) -> list[dict[str, Any]]:
+    """Snapshot index entries in append order; the newest entry per ID wins."""
+    path = _snapshot_index_path(candidate_path)
+    try:
+        if not path.exists():
+            return []
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise ImportContractError(
+            "snapshot_unreadable", "Profile snapshot index cannot be read"
+        ) from exc
+    entries: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ImportContractError(
+                "snapshot_unreadable", "Profile snapshot index contains an invalid record"
+            ) from exc
+        if not isinstance(record, dict):
+            raise ImportContractError(
+                "snapshot_unreadable", "Profile snapshot index contains an invalid record"
+            )
+        snapshot_id = str(record.get("snapshot_id", ""))
+        if not re.fullmatch(r"profile-snapshot-[a-f0-9]{16}", snapshot_id):
+            raise ImportContractError(
+                "snapshot_unreadable", "Profile snapshot index contains an invalid ID"
+            )
+        if record.get("state") == "removed":
+            entries.pop(snapshot_id, None)
+            continue
+        if snapshot_id not in entries:
+            order.append(snapshot_id)
+        entries[snapshot_id] = record
+    return [entries[snapshot_id] for snapshot_id in order if snapshot_id in entries]
+
+
+def _write_snapshot_content(path: Path, payload: bytes) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_name, path)
+        _fsync_parent_directory(path.parent)
+    except OSError as exc:
+        temporary_path.unlink(missing_ok=True)
+        raise ImportContractError(
+            "snapshot_write_failed", "Profile snapshot could not be durably written"
+        ) from exc
+
+
+def _capture_profile_snapshot_locked(
+    candidate_path: Path,
+    reason: str,
+    label: str | None = None,
+    related_transaction_id: str | None = None,
+) -> dict[str, Any]:
+    """Copies the current profile byte-for-byte into the snapshot store.
+
+    Content is addressed by its own digest, so repeating a snapshot of an
+    unchanged profile reuses the stored bytes instead of duplicating them.
+    """
+    try:
+        payload = candidate_path.read_bytes()
+    except OSError as exc:
+        raise ImportContractError(
+            "candidate_unreadable", "Candidate profile cannot be read"
+        ) from exc
+    if len(payload) > MAX_PROFILE_SNAPSHOT_BYTES:
+        raise ImportContractError(
+            "snapshot_too_large", "Candidate profile exceeds the snapshot size limit"
+        )
+    digest = hashlib.sha256(payload).hexdigest()
+    if label is not None and (
+        not label.strip() or len(label) > PROFILE_SNAPSHOT_LABEL_MAX
+    ):
+        raise ImportContractError(
+            "invalid_snapshot", "Snapshot label is empty or too long"
+        )
+    root = _snapshot_root(candidate_path)
+    try:
+        root.mkdir(mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise ImportContractError(
+            "snapshot_write_failed", "Profile snapshot directory cannot be created"
+        ) from exc
+    existing = _read_snapshot_index(candidate_path)
+    reused = next(
+        (item for item in existing if str(item.get("candidate_sha256")) == digest), None
+    )
+    if reused is not None:
+        return {**reused, "reused": True}
+    snapshot_id = f"profile-snapshot-{secrets.token_hex(8)}"
+    _write_snapshot_content(_snapshot_content_path(candidate_path, snapshot_id), payload)
+    document = yaml.safe_load(payload.decode("utf-8"))
+    entry = {
+        "snapshot_id": snapshot_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "candidate_sha256": digest,
+        "byte_size": len(payload),
+        "reason": reason,
+        "claim_count": len(document.get("claims", []))
+        if isinstance(document, dict)
+        else 0,
+        **({"label": label} if label else {}),
+        **(
+            {"related_transaction_id": related_transaction_id}
+            if related_transaction_id
+            else {}
+        ),
+    }
+    _append_snapshot_index_record(_snapshot_index_path(candidate_path), entry)
+    _prune_profile_snapshots(candidate_path)
+    return {**entry, "reused": False}
+
+
+def _prune_profile_snapshots(candidate_path: Path) -> None:
+    """Drops the oldest snapshots beyond the retention bound, oldest first."""
+    entries = _read_snapshot_index(candidate_path)
+    surplus = len(entries) - MAX_PROFILE_SNAPSHOTS
+    if surplus <= 0:
+        return
+    for entry in entries[:surplus]:
+        snapshot_id = str(entry["snapshot_id"])
+        _snapshot_content_path(candidate_path, snapshot_id).unlink(missing_ok=True)
+        _append_snapshot_index_record(
+            _snapshot_index_path(candidate_path),
+            {
+                "snapshot_id": snapshot_id,
+                "state": "removed",
+                "occurred_at": datetime.now(timezone.utc).isoformat(),
+                "reason": "retention_limit",
+            },
+        )
+
+
+def _read_profile_snapshot(candidate_path: Path, snapshot_id: str) -> tuple[bytes, dict[str, Any]]:
+    # Validate the ID shape before it is used for lookup or path construction.
+    path = _snapshot_content_path(candidate_path, snapshot_id)
+    entry = next(
+        (
+            item
+            for item in _read_snapshot_index(candidate_path)
+            if str(item.get("snapshot_id")) == snapshot_id
+        ),
+        None,
+    )
+    if entry is None:
+        raise ImportContractError("unknown_snapshot", "Profile snapshot does not exist")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ImportContractError(
+            "snapshot_unreadable", "Profile snapshot content cannot be read"
+        ) from exc
+    if hashlib.sha256(payload).hexdigest() != str(entry.get("candidate_sha256")):
+        raise ImportContractError(
+            "snapshot_corrupted", "Profile snapshot content does not match its digest"
+        )
+    return payload, entry
+
+
+def capture_profile_snapshot(
+    candidate_path: str | Path,
+    expected_candidate_sha256: str,
+    label: str | None = None,
+    reason: str = "manual",
+) -> dict[str, Any]:
+    path = Path(candidate_path)
+    with _exclusive_profile_lock(path):
+        actual_digest = _candidate_digest(path)
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", expected_candidate_sha256)
+            or actual_digest != expected_candidate_sha256
+        ):
+            raise ImportContractError(
+                "cas_mismatch", "Candidate profile changed since it was loaded"
+            )
+        snapshot = _capture_profile_snapshot_locked(path, reason, label)
+        return {
+            "status": "profile_snapshot_captured",
+            "candidate_sha256": actual_digest,
+            "snapshot": snapshot,
+        }
+
+
+def list_profile_snapshots(candidate_path: str | Path) -> dict[str, Any]:
+    path = Path(candidate_path)
+    with _exclusive_profile_lock(path):
+        current = _candidate_digest(path)
+        snapshots = _read_snapshot_index(path)
+        return {
+            "status": "profile_snapshot_list",
+            "candidate_sha256": current,
+            "snapshots": [
+                {**item, "current": str(item.get("candidate_sha256")) == current}
+                for item in snapshots
+            ],
+        }
+
+
+def restore_profile_snapshot(
+    candidate_path: str | Path,
+    snapshot_id: str,
+    expected_candidate_sha256: str,
+) -> dict[str, Any]:
+    path = Path(candidate_path)
+    with _exclusive_profile_lock(path):
+        actual_digest = _candidate_digest(path)
+        recovered_transaction_ids = _recover_incomplete_intents(path, actual_digest)
+        actual_digest = _candidate_digest(path)
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", expected_candidate_sha256)
+            or actual_digest != expected_candidate_sha256
+        ):
+            raise ImportContractError(
+                "cas_mismatch", "Candidate profile changed since it was loaded"
+            )
+        payload, entry = _read_profile_snapshot(path, snapshot_id)
+        if str(entry.get("candidate_sha256")) == actual_digest:
+            return {
+                "status": "profile_already_at_snapshot",
+                "candidate_sha256": actual_digest,
+                "snapshot_id": snapshot_id,
+                "recovered_transaction_ids": recovered_transaction_ids,
+            }
+        try:
+            restored = yaml.safe_load(payload.decode("utf-8"))
+        except (UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise ImportContractError(
+                "snapshot_corrupted", "Profile snapshot is not readable YAML"
+            ) from exc
+        if not isinstance(restored, dict):
+            raise ImportContractError(
+                "snapshot_corrupted", "Profile snapshot is not a candidate profile"
+            )
+        errors = validate_candidate(restored)
+        if errors:
+            raise ImportContractError("snapshot_invalid", "; ".join(errors))
+        # Snapshot the pre-restore state so a restore is itself reversible.
+        replaced = _capture_profile_snapshot_locked(path, "pre_restore")
+        after_digest, transaction_id = _commit_candidate_profile_locked(
+            path,
+            expected_candidate_sha256,
+            actual_digest,
+            restored,
+            "restore_candidate_profile_snapshot",
+            {
+                "restored_snapshot_id": snapshot_id,
+                "replaced_snapshot_id": replaced["snapshot_id"],
+            },
+        )
+        return {
+            "status": "profile_snapshot_restored",
+            "candidate_sha256": after_digest,
+            "snapshot_id": snapshot_id,
+            "replaced_snapshot_id": replaced["snapshot_id"],
+            "transaction_id": transaction_id,
+            "recovered_transaction_ids": recovered_transaction_ids,
+        }
+
+
+def _adopted_transaction_ledger(
+    candidate_path: Path, transaction_id: str
+) -> dict[str, Any]:
+    """Resolves the committed adoption intent that a revoke is scoped to.
+
+    The intent record is the only place that lists exactly what one adoption
+    added, so revoking anything else would either orphan or over-delete claims.
+    """
+    if not re.fullmatch(r"[a-f0-9]{32}", transaction_id):
+        raise ImportContractError(
+            "invalid_transaction", "Transaction ID is not a valid adoption transaction"
+        )
+    history = _read_history(_history_path(candidate_path))
+    intent = next(
+        (
+            record
+            for record in history
+            if record.get("state") == "intent"
+            and str(record.get("transaction_id")) == transaction_id
+        ),
+        None,
+    )
+    if intent is None:
+        raise ImportContractError(
+            "unknown_transaction", "Adoption transaction is not present in the history"
+        )
+    if str(intent.get("operation")) != "adopt_confirmed_cv_facts":
+        raise ImportContractError(
+            "invalid_transaction", "Transaction is not a CV adoption"
+        )
+    completed = any(
+        str(record.get("transaction_id")) == transaction_id
+        and record.get("state") in {"committed", "committed_recovered"}
+        for record in history
+    )
+    if not completed:
+        raise ImportContractError(
+            "invalid_transaction", "Adoption transaction was never committed"
+        )
+    if any(
+        str(record.get("revoked_transaction_id")) == transaction_id
+        and record.get("state") == "intent"
+        for record in history
+    ):
+        raise ImportContractError(
+            "already_revoked", "Adoption transaction was already revoked"
+        )
+    return intent
+
+
+def list_adoptions(candidate_path: str | Path) -> dict[str, Any]:
+    """Committed adoptions that are still revocable, oldest first.
+
+    The server record can lose its adoption link (a re-review clears it) while
+    the claims stay in the profile, so the ledger is the authority on what is
+    still revocable.
+    """
+    path = Path(candidate_path)
+    with _exclusive_profile_lock(path):
+        current = _candidate_digest(path)
+        history = _read_history(_history_path(path))
+        completed = {
+            str(record.get("transaction_id"))
+            for record in history
+            if record.get("state") in {"committed", "committed_recovered"}
+        }
+        revoked = {
+            str(record.get("revoked_transaction_id"))
+            for record in history
+            if record.get("state") == "intent" and record.get("revoked_transaction_id")
+        }
+        candidate = load_yaml(path)
+        present = {
+            str(item.get("id"))
+            for item in candidate.get("claims", []) or []
+            if isinstance(item, dict)
+        }
+        adoptions = []
+        for record in history:
+            transaction_id = str(record.get("transaction_id", ""))
+            if (
+                record.get("state") != "intent"
+                or record.get("operation") != "adopt_confirmed_cv_facts"
+                or transaction_id not in completed
+                or transaction_id in revoked
+            ):
+                continue
+            claim_ids = [
+                str(item)
+                for item in record.get("adopted_claim_ids", []) or []
+                if isinstance(item, str)
+            ]
+            adoptions.append(
+                {
+                    "transaction_id": transaction_id,
+                    "occurred_at": record.get("occurred_at"),
+                    "source_sha256": record.get("proposal_source_sha256"),
+                    "claim_count": len(claim_ids),
+                    "present_claim_count": len([c for c in claim_ids if c in present]),
+                    "before_sha256": record.get("before_sha256"),
+                    "after_sha256": record.get("after_sha256"),
+                    **(
+                        {"replaced_snapshot_id": record["replaced_snapshot_id"]}
+                        if record.get("replaced_snapshot_id")
+                        else {}
+                    ),
+                }
+            )
+        return {
+            "status": "adoption_list",
+            "candidate_sha256": current,
+            "adoptions": adoptions,
+        }
+
+
+def revoke_claims(
+    candidate_path: str | Path,
+    transaction_id: str,
+    expected_candidate_sha256: str,
+) -> dict[str, Any]:
+    """Removes exactly what one committed adoption added, CAS-bound.
+
+    Claims, adopted records and now-unreferenced sources are dropped. Profile
+    scalars that the adoption overwrote cannot be reconstructed from the ledger;
+    the pre-revoke snapshot and the adoption's `before_sha256` are reported so a
+    caller can offer a full rollback instead.
+    """
+    path = Path(candidate_path)
+    with _exclusive_profile_lock(path):
+        actual_digest = _candidate_digest(path)
+        recovered_transaction_ids = _recover_incomplete_intents(path, actual_digest)
+        actual_digest = _candidate_digest(path)
+        if (
+            not re.fullmatch(r"[a-f0-9]{64}", expected_candidate_sha256)
+            or actual_digest != expected_candidate_sha256
+        ):
+            raise ImportContractError(
+                "cas_mismatch", "Candidate profile changed since it was loaded"
+            )
+        intent = _adopted_transaction_ledger(path, transaction_id)
+        revoked_claim_ids = {
+            str(item)
+            for item in intent.get("adopted_claim_ids", [])
+            if isinstance(item, str)
+        }
+        revoked_record_ids = {
+            str(item)
+            for item in intent.get("adopted_record_ids", [])
+            if isinstance(item, str)
+        }
+        if not revoked_claim_ids:
+            raise ImportContractError(
+                "invalid_transaction", "Adoption transaction recorded no claims"
+            )
+        candidate = load_yaml(path)
+        updated = copy.deepcopy(candidate)
+        present_claim_ids = {
+            str(item.get("id"))
+            for item in updated.get("claims", [])
+            if isinstance(item, dict)
+        } & revoked_claim_ids
+        if not present_claim_ids:
+            return {
+                "status": "no_revocable_claims",
+                "candidate_sha256": actual_digest,
+                "transaction_id": transaction_id,
+                "revoked_claim_ids": [],
+                "revoked_record_ids": [],
+                "recovered_transaction_ids": recovered_transaction_ids,
+            }
+        updated["claims"] = [
+            item
+            for item in updated.get("claims", [])
+            if not (isinstance(item, dict) and str(item.get("id")) in revoked_claim_ids)
+        ]
+        removed_record_ids: list[str] = []
+        for collection in (
+            "experience",
+            "projects",
+            "education",
+            "certifications",
+            "skills",
+            "languages",
+        ):
+            retained: list[Any] = []
+            for record in updated.get(collection, []) or []:
+                if not isinstance(record, dict):
+                    retained.append(record)
+                    continue
+                record_id = str(record.get("id"))
+                remaining = [
+                    claim_id
+                    for claim_id in record.get("claim_ids", []) or []
+                    if str(claim_id) not in revoked_claim_ids
+                ]
+                if record_id in revoked_record_ids and not remaining:
+                    removed_record_ids.append(record_id)
+                    continue
+                # A record the adoption only partly contributed to survives with
+                # its foreign claims intact.
+                record["claim_ids"] = remaining
+                retained.append(record)
+            updated[collection] = retained
+        referenced_sources = {
+            str(ref)
+            for item in updated.get("claims", [])
+            if isinstance(item, dict)
+            for ref in item.get("evidence_refs", []) or []
+        }
+        removed_source_ids = sorted(
+            {
+                str(item.get("id"))
+                for item in updated.get("sources", []) or []
+                if isinstance(item, dict) and str(item.get("id")) not in referenced_sources
+            }
+        )
+        updated["sources"] = [
+            item
+            for item in updated.get("sources", []) or []
+            if not isinstance(item, dict) or str(item.get("id")) in referenced_sources
+        ]
+        errors = validate_candidate(updated)
+        if errors:
+            raise ImportContractError("candidate_validation_failed", "; ".join(errors))
+        # Snapshot before mutating so the revoke itself stays reversible.
+        replaced = _capture_profile_snapshot_locked(
+            path, "pre_revoke", related_transaction_id=transaction_id
+        )
+        before_sha256 = str(intent.get("before_sha256", ""))
+        rollback_snapshot_id = next(
+            (
+                str(item.get("snapshot_id"))
+                for item in _read_snapshot_index(path)
+                if str(item.get("candidate_sha256")) == before_sha256
+            ),
+            None,
+        )
+        after_digest, revoke_transaction_id = _commit_candidate_profile_locked(
+            path,
+            expected_candidate_sha256,
+            actual_digest,
+            updated,
+            "revoke_adopted_cv_claims",
+            {
+                "revoked_transaction_id": transaction_id,
+                "revoked_claim_ids": sorted(present_claim_ids),
+                "revoked_record_ids": sorted(removed_record_ids),
+                "replaced_snapshot_id": replaced["snapshot_id"],
+            },
+        )
+        return {
+            "status": "claims_revoked",
+            "candidate_sha256": after_digest,
+            "transaction_id": revoke_transaction_id,
+            "revoked_transaction_id": transaction_id,
+            "revoked_claim_ids": sorted(present_claim_ids),
+            "revoked_record_ids": sorted(removed_record_ids),
+            "removed_source_ids": removed_source_ids,
+            "replaced_snapshot_id": replaced["snapshot_id"],
+            "adoption_before_sha256": before_sha256,
+            **(
+                {"rollback_snapshot_id": rollback_snapshot_id}
+                if rollback_snapshot_id
+                else {}
+            ),
+            "recovered_transaction_ids": recovered_transaction_ids,
+        }
+
+
 def _adopt_confirmed_locked(
     proposal_data: Any,
     candidate_path: str | Path,
@@ -3358,6 +3936,9 @@ def _adopt_confirmed_locked(
             "candidate_validation_failed", "; ".join(candidate_errors)
         )
 
+    # Capture the pre-adoption profile so a later revoke can offer a full
+    # rollback, including profile scalars this adoption is about to overwrite.
+    replaced_snapshot = _capture_profile_snapshot_locked(path, "pre_adoption")
     after_digest, transaction_id = _commit_candidate_profile_locked(
         path,
         expected_candidate_sha256,
@@ -3365,6 +3946,7 @@ def _adopt_confirmed_locked(
         updated,
         "adopt_confirmed_cv_facts",
         {
+            "replaced_snapshot_id": replaced_snapshot["snapshot_id"],
             "proposal_source_sha256": source["sha256"],
             "adopted_fact_ids": sorted(selected_facts),
             "adopted_claim_ids": sorted(selected_claims),
@@ -3379,6 +3961,7 @@ def _adopt_confirmed_locked(
         "adopted_claim_ids": sorted(selected_claims),
         "adopted_record_ids": sorted(adopted_record_ids),
         "rejected_or_pending_fact_ids": sorted(set(proposed_facts) - selected_facts),
+        "replaced_snapshot_id": replaced_snapshot["snapshot_id"],
         "history_recorded": True,
         "transaction_id": transaction_id,
         "recovered_transaction_ids": recovered_transaction_ids,
@@ -3502,6 +4085,23 @@ def main() -> int:
     adopt.add_argument("--candidate", required=True)
     adopt.add_argument("--decisions", required=True)
     adopt.add_argument("--expected-candidate-sha256", required=True)
+    list_adoptions_command = commands.add_parser("list-adoptions")
+    list_adoptions_command.add_argument("--candidate", required=True)
+    revoke = commands.add_parser("revoke-claims")
+    revoke.add_argument("--candidate", required=True)
+    revoke.add_argument("--transaction-id", required=True)
+    revoke.add_argument("--expected-candidate-sha256", required=True)
+    capture_snapshot = commands.add_parser("capture-profile-snapshot")
+    capture_snapshot.add_argument("--candidate", required=True)
+    capture_snapshot.add_argument("--expected-candidate-sha256", required=True)
+    capture_snapshot.add_argument("--label")
+    capture_snapshot.add_argument("--reason", default="manual")
+    list_snapshots = commands.add_parser("list-profile-snapshots")
+    list_snapshots.add_argument("--candidate", required=True)
+    restore_snapshot = commands.add_parser("restore-profile-snapshot")
+    restore_snapshot.add_argument("--candidate", required=True)
+    restore_snapshot.add_argument("--snapshot-id", required=True)
+    restore_snapshot.add_argument("--expected-candidate-sha256", required=True)
     recovery = commands.add_parser("recovery-status")
     recovery.add_argument("--candidate", required=True)
     validate_ai = commands.add_parser("validate-ai-structure")
@@ -3615,6 +4215,29 @@ def main() -> int:
                 proposal,
                 args.candidate,
                 decisions,
+                args.expected_candidate_sha256,
+            )
+        elif args.command == "list-adoptions":
+            result = list_adoptions(args.candidate)
+        elif args.command == "revoke-claims":
+            result = revoke_claims(
+                args.candidate,
+                args.transaction_id,
+                args.expected_candidate_sha256,
+            )
+        elif args.command == "capture-profile-snapshot":
+            result = capture_profile_snapshot(
+                args.candidate,
+                args.expected_candidate_sha256,
+                args.label,
+                args.reason,
+            )
+        elif args.command == "list-profile-snapshots":
+            result = list_profile_snapshots(args.candidate)
+        elif args.command == "restore-profile-snapshot":
+            result = restore_profile_snapshot(
+                args.candidate,
+                args.snapshot_id,
                 args.expected_candidate_sha256,
             )
         else:

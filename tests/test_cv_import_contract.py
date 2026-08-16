@@ -23,12 +23,17 @@ from scripts.cv_import_contract import (
     adopt_confirmed,
     apply_ai_structure_request,
     capabilities,
+    capture_profile_snapshot,
     extend_user_facts,
     extract_cv,
+    list_adoptions,
+    list_profile_snapshots,
     materialize_ai_structure_request,
     normalize_extracted_envelope,
     proposal_cas_sha256,
     recovery_status,
+    restore_profile_snapshot,
+    revoke_claims,
     validate_ai_structure_request,
     validate_proposal,
 )
@@ -2229,6 +2234,285 @@ class CvImportContractTests(unittest.TestCase):
         self.assertEqual(summary["status"], "proposal_created")
         self.assertNotIn("Mustertechnik", process.stdout)
         self.assertEqual(validate_proposal(proposal), [])
+
+
+class RevokeAndSnapshotTest(unittest.TestCase):
+    def adopt_everything(self, directory: str) -> tuple[Path, dict[str, Any], Any]:
+        """Adopts every confirmable fact of the synthetic CV into a fresh profile."""
+        proposal = extract_cv(FIXTURES / "synthetic-cv.html")
+        candidate_path = Path(directory) / "candidate.yaml"
+        candidate_path.write_text(
+            (FIXTURES / "valid-candidate.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        decisions = [
+            {
+                "fact_id": fact["id"],
+                "decision": "confirm",
+                "explicitly_confirmed": True,
+                "confirmation_origin": "explicit_local_user_action",
+            }
+            for fact in proposal["proposal"]["facts"]
+        ]
+        adopted = adopt_confirmed(proposal, candidate_path, decisions, digest)
+        return candidate_path, adopted, proposal
+
+    def test_revoke_removes_exactly_what_the_adoption_transaction_added(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path, adopted, _ = self.adopt_everything(directory)
+            before = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
+            self.assertTrue(adopted["adopted_claim_ids"])
+
+            # A foreign claim must survive the revoke untouched.
+            foreign = {
+                "id": "claim-" + "f" * 16,
+                "category": "skill",
+                "statement": "name: Foreign",
+                "status": "user_confirmed",
+                "evidence_refs": ["source-user-foreign"],
+                "allowed_outputs": ["cv"],
+                "tags": [],
+                "valid_from": None,
+                "valid_to": None,
+                "notes": "Not from the revoked adoption.",
+            }
+            before["claims"].append(foreign)
+            before["sources"].append(
+                {
+                    "id": "source-user-foreign",
+                    "type": "user_supplied_fact",
+                    "label": "Foreign",
+                    "location": "sha256:" + "0" * 64,
+                }
+            )
+            candidate_path.write_text(
+                yaml.safe_dump(before, allow_unicode=True, sort_keys=False),
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+
+            result = revoke_claims(candidate_path, adopted["transaction_id"], digest)
+            after = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(result["status"], "claims_revoked")
+        self.assertEqual(
+            result["revoked_claim_ids"], sorted(adopted["adopted_claim_ids"])
+        )
+        self.assertEqual(
+            result["revoked_record_ids"], sorted(adopted["adopted_record_ids"])
+        )
+        baseline = yaml.safe_load(
+            (FIXTURES / "valid-candidate.yaml").read_text(encoding="utf-8")
+        )
+        # Everything the adoption added is gone; nothing else is.
+        self.assertEqual(
+            [item["id"] for item in after["claims"]],
+            [item["id"] for item in baseline["claims"]] + [foreign["id"]],
+        )
+        self.assertEqual(
+            [item["id"] for item in after["sources"]],
+            [item["id"] for item in baseline["sources"]] + ["source-user-foreign"],
+        )
+        for collection in ("experience", "projects", "education", "certifications"):
+            self.assertEqual(
+                [item["id"] for item in after.get(collection) or []],
+                [item["id"] for item in baseline.get(collection) or []],
+            )
+        self.assertEqual(result["revoked_transaction_id"], adopted["transaction_id"])
+        self.assertTrue(result["replaced_snapshot_id"])
+
+    def test_revoke_is_cas_bound_and_refuses_unknown_or_repeated_transactions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path, adopted, _ = self.adopt_everything(directory)
+            digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+
+            with self.assertRaises(ImportContractError) as stale:
+                revoke_claims(candidate_path, adopted["transaction_id"], "a" * 64)
+            self.assertEqual(stale.exception.code, "cas_mismatch")
+
+            with self.assertRaises(ImportContractError) as unknown:
+                revoke_claims(candidate_path, "b" * 32, digest)
+            self.assertEqual(unknown.exception.code, "unknown_transaction")
+
+            with self.assertRaises(ImportContractError) as malformed:
+                revoke_claims(candidate_path, "not-a-transaction", digest)
+            self.assertEqual(malformed.exception.code, "invalid_transaction")
+
+            revoked = revoke_claims(candidate_path, adopted["transaction_id"], digest)
+            self.assertEqual(revoked["status"], "claims_revoked")
+
+            # The profile is untouched, so the CAS hash from before still applies.
+            after_digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+            with self.assertRaises(ImportContractError) as repeated:
+                revoke_claims(
+                    candidate_path, adopted["transaction_id"], after_digest
+                )
+            self.assertEqual(repeated.exception.code, "already_revoked")
+
+    def test_revoke_frees_the_claims_for_a_clean_re_adoption(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path, adopted, proposal = self.adopt_everything(directory)
+            digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+
+            decisions = [
+                {
+                    "fact_id": fact["id"],
+                    "decision": "confirm",
+                    "explicitly_confirmed": True,
+                    "confirmation_origin": "explicit_local_user_action",
+                }
+                for fact in proposal["proposal"]["facts"]
+            ]
+            with self.assertRaises(ImportContractError) as collision:
+                adopt_confirmed(proposal, candidate_path, decisions, digest)
+            self.assertEqual(collision.exception.code, "claim_collision")
+
+            revoke_claims(candidate_path, adopted["transaction_id"], digest)
+            freed = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+            re_adopted = adopt_confirmed(proposal, candidate_path, decisions, freed)
+
+        self.assertEqual(re_adopted["status"], "adopted_user_confirmed")
+        self.assertEqual(
+            sorted(re_adopted["adopted_claim_ids"]),
+            sorted(adopted["adopted_claim_ids"]),
+        )
+
+    def test_adoption_snapshot_restores_overwritten_profile_scalars(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path, adopted, _ = self.adopt_everything(directory)
+            snapshot_id = adopted["replaced_snapshot_id"]
+            self.assertTrue(snapshot_id)
+            after_adopt = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
+            digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+
+            listed = list_profile_snapshots(candidate_path)
+            self.assertIn(
+                snapshot_id, [item["snapshot_id"] for item in listed["snapshots"]]
+            )
+
+            restored = restore_profile_snapshot(candidate_path, snapshot_id, digest)
+            rolled_back = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
+
+        baseline = yaml.safe_load(
+            (FIXTURES / "valid-candidate.yaml").read_text(encoding="utf-8")
+        )
+        self.assertEqual(restored["status"], "profile_snapshot_restored")
+        self.assertEqual(rolled_back, baseline)
+        # The scalar overwrite that a claim-scoped revoke cannot undo is gone.
+        self.assertNotEqual(
+            after_adopt["profile"]["full_name"], rolled_back["profile"]["full_name"]
+        )
+        self.assertEqual(rolled_back["profile"]["full_name"], "Erika Beispiel")
+        self.assertTrue(restored["replaced_snapshot_id"])
+
+    def test_snapshots_are_cas_bound_content_addressed_and_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path = Path(directory) / "candidate.yaml"
+            candidate_path.write_text(
+                (FIXTURES / "valid-candidate.yaml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+
+            with self.assertRaises(ImportContractError) as stale:
+                capture_profile_snapshot(candidate_path, "c" * 64)
+            self.assertEqual(stale.exception.code, "cas_mismatch")
+
+            first = capture_profile_snapshot(candidate_path, digest, "Vor dem Import")
+            self.assertEqual(first["status"], "profile_snapshot_captured")
+            self.assertFalse(first["snapshot"]["reused"])
+            self.assertEqual(first["snapshot"]["label"], "Vor dem Import")
+
+            # An unchanged profile reuses the stored bytes instead of duplicating.
+            second = capture_profile_snapshot(candidate_path, digest)
+            self.assertTrue(second["snapshot"]["reused"])
+            self.assertEqual(
+                second["snapshot"]["snapshot_id"], first["snapshot"]["snapshot_id"]
+            )
+
+            snapshot_id = first["snapshot"]["snapshot_id"]
+            self.assertEqual(
+                restore_profile_snapshot(candidate_path, snapshot_id, digest)["status"],
+                "profile_already_at_snapshot",
+            )
+
+            with self.assertRaises(ImportContractError) as unknown:
+                restore_profile_snapshot(
+                    candidate_path, "profile-snapshot-" + "0" * 16, digest
+                )
+            self.assertEqual(unknown.exception.code, "unknown_snapshot")
+
+            with self.assertRaises(ImportContractError) as malformed:
+                restore_profile_snapshot(candidate_path, "../escape", digest)
+            self.assertEqual(malformed.exception.code, "invalid_snapshot")
+
+            content = (
+                candidate_path.with_suffix(candidate_path.suffix + ".snapshots")
+                / f"{snapshot_id}.yaml"
+            )
+            content.write_text("tampered: true\n", encoding="utf-8")
+            with self.assertRaises(ImportContractError) as corrupted:
+                restore_profile_snapshot(candidate_path, snapshot_id, digest)
+            self.assertEqual(corrupted.exception.code, "snapshot_corrupted")
+
+    def test_revoke_cli_reports_the_transaction_and_stays_quiet_about_content(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path, adopted, _ = self.adopt_everything(directory)
+            digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "scripts.cv_import_contract",
+                    "revoke-claims",
+                    "--candidate",
+                    str(candidate_path),
+                    "--transaction-id",
+                    adopted["transaction_id"],
+                    "--expected-candidate-sha256",
+                    digest,
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(process.returncode, 0, process.stderr)
+        summary = json.loads(process.stdout)
+        self.assertEqual(summary["status"], "claims_revoked")
+        self.assertEqual(summary["revoked_transaction_id"], adopted["transaction_id"])
+        self.assertNotIn("Mustertechnik", process.stdout)
+
+    def test_adoption_ledger_lists_revocable_transactions_until_revoked(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path, adopted, _ = self.adopt_everything(directory)
+            listed = list_adoptions(candidate_path)
+            self.assertEqual(len(listed["adoptions"]), 1)
+            entry = listed["adoptions"][0]
+            self.assertEqual(entry["transaction_id"], adopted["transaction_id"])
+            self.assertEqual(entry["claim_count"], len(adopted["adopted_claim_ids"]))
+            self.assertEqual(entry["present_claim_count"], entry["claim_count"])
+            self.assertTrue(entry["source_sha256"])
+
+            digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+            revoke_claims(candidate_path, adopted["transaction_id"], digest)
+            self.assertEqual(list_adoptions(candidate_path)["adoptions"], [])
+
+    def test_capabilities_announce_the_claim_management_commands(self) -> None:
+        commands = capabilities()["commands"]
+        for command in (
+            "revoke-claims",
+            "list-adoptions",
+            "capture-profile-snapshot",
+            "list-profile-snapshots",
+            "restore-profile-snapshot",
+        ):
+            self.assertIn(command, commands)
 
 
 if __name__ == "__main__":
