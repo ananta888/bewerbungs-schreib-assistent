@@ -98,6 +98,61 @@ DATE_RANGE = re.compile(
     re.IGNORECASE,
 )
 BULLET = re.compile(r"^[\s\-–—*•·▪◦]+")
+BULLET_START = re.compile(r"^[\s]*[-–—*•·▪◦]\s+")
+DOCUMENT_TITLES = {
+    "lebenslauf", "curriculum vitae", "cv", "resume", "résumé", "bewerbung",
+}
+"""Two to four plain words: a person's name, not a label, address or heading."""
+PERSON_NAME = re.compile(r"^[^\d@:/|,]+$")
+
+
+def _looks_like_person_name(line: str) -> bool:
+    if not PERSON_NAME.match(line):
+        return False
+    if line.casefold().strip() in DOCUMENT_TITLES:
+        return False
+    words = line.split()
+    if not 2 <= len(words) <= 4:
+        return False
+    return all(word[:1].isalpha() and word[:1].isupper() for word in words)
+INLINE_BULLET = re.compile(r"\s+[•·▪◦]\s+")
+BARE_DATE_RANGE = re.compile(
+    rf"^(?P<start>{DATE_TOKEN_PATTERN})\s*(?:-|–|—|bis|to)\s*(?P<end>{DATE_TOKEN_PATTERN})\s*$",
+    re.IGNORECASE,
+)
+"""A line is a wrapped continuation when the previous one was cut mid-sentence."""
+SENTENCE_END = re.compile(r"[.;:!?]$")
+
+
+def _repair_wrapped_lines(entries: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """Rejoins lines that a PDF broke mid-sentence.
+
+    Without this a wrapped bullet ("… zur sicheren Orchestrierung" / "von
+    KI-Agenten …") is indistinguishable from a new job heading, because both
+    arrive as plain lines without a bullet marker.
+    """
+    repaired: list[tuple[int, str]] = []
+    for line_no, line in entries:
+        previous = repaired[-1][1] if repaired else ""
+        continues = (
+            bool(repaired)
+            and not BULLET_START.match(line)
+            and not DATE_RANGE.match(line)
+            and not BARE_DATE_RANGE.match(line)
+            and bool(previous)
+            and not SENTENCE_END.search(previous)
+        )
+        if continues:
+            repaired[-1] = (repaired[-1][0], f"{previous} {line.strip()}")
+        else:
+            repaired.append((line_no, line))
+    return repaired
+
+
+def _split_inline_bullets(line: str) -> list[str]:
+    """Splits several bullet points that share one extracted line."""
+    parts = INLINE_BULLET.split(line)
+    return [part for part in (item.strip() for item in parts) if part]
 
 
 class ImportContractError(ValueError):
@@ -252,6 +307,99 @@ def _read_bounded(path: Path) -> bytes:
             "input_too_large", f"Input exceeds {MAX_INPUT_BYTES} bytes"
         )
     return path.read_bytes()
+
+
+MIN_COLUMN_GUTTER = 4
+MIN_COLUMN_WIDTH = 12
+MIN_COLUMN_SHARE = 0.12
+
+
+def _page_columns(lines: list[str]) -> list[tuple[int, int]]:
+    """Column spans of one page, detected from persistent vertical whitespace.
+
+    A layout-preserved page keeps every glyph at its horizontal position, so a
+    column boundary shows up as a run of character positions that is blank on
+    *every* line. Returns a single span when nothing convincing is found, which
+    keeps single-column documents on their previous behaviour.
+    """
+    width = max((len(line) for line in lines), default=0)
+    if width < MIN_COLUMN_WIDTH * 2 + MIN_COLUMN_GUTTER:
+        return [(0, width)]
+    counts = [0] * width
+    total = 0
+    body = [line for line in lines if line.strip()]
+    for line in body:
+        for index, char in enumerate(line):
+            if char != " ":
+                counts[index] += 1
+                total += 1
+    if total == 0:
+        return [(0, width)]
+    # A gutter must be *almost* empty, not perfectly empty: a single overlong
+    # line would otherwise erase an obvious column boundary.
+    tolerance = max(1, int(len(body) * 0.03))
+    occupied = [count > tolerance for count in counts]
+
+    spans: list[tuple[int, int]] = []
+    start: int | None = None
+    for index in range(width):
+        if occupied[index] and start is None:
+            start = index
+        elif not occupied[index] and start is not None:
+            if index - start >= 1:
+                spans.append((start, index))
+            start = None
+    if start is not None:
+        spans.append((start, width))
+    if not spans:
+        return [(0, width)]
+
+    # Merge spans separated by less than a full gutter; those are word gaps.
+    merged: list[list[int]] = [list(spans[0])]
+    for begin, end in spans[1:]:
+        if begin - merged[-1][1] < MIN_COLUMN_GUTTER:
+            merged[-1][1] = end
+        else:
+            merged.append([begin, end])
+    columns = [(begin, end) for begin, end in merged if end - begin >= MIN_COLUMN_WIDTH]
+    if len(columns) < 2:
+        return [(0, width)]
+
+    # Every column must carry a real share of the page, otherwise a stray
+    # right-aligned date or page number would masquerade as a column.
+    weights = []
+    for begin, end in columns:
+        weight = sum(
+            1 for line in lines for char in line[begin:end] if char != " "
+        )
+        weights.append(weight)
+    if any(weight < total * MIN_COLUMN_SHARE for weight in weights):
+        return [(0, width)]
+    return columns
+
+
+def _reading_order(text: str) -> str:
+    """Rewrites a layout-preserved extraction into single-column reading order.
+
+    `pdftotext` emits a multi-column page line by line across all columns, so a
+    sidebar and the main column arrive interleaved: a date lands between the
+    previous entry's heading and its bullet list. Everything downstream is line
+    based and single column, so the columns are separated here, before the
+    leading whitespace that carries the layout is normalised away.
+    """
+    pages = text.replace("\r\n", "\n").replace("\r", "\n").split("\f")
+    ordered: list[str] = []
+    for page in pages:
+        lines = page.split("\n")
+        if not any(line.strip() for line in lines):
+            continue
+        columns = _page_columns(lines)
+        for begin, end in columns:
+            column = [line[begin:end].rstrip() for line in lines]
+            if any(part.strip() for part in column):
+                ordered.extend(column)
+                ordered.append("")
+    return "\n".join(ordered)
 
 
 def _normalize_lines(text: str) -> list[str]:
@@ -435,7 +583,9 @@ def _extract_pdf(
         )
     try:
         result = subprocess.run(
-            [executable, "-enc", "UTF-8", "-nopgbrk", str(path.resolve()), "-"],
+            # `-layout` keeps horizontal positions so columns stay separable,
+            # and page breaks are kept so each page is analysed on its own.
+            [executable, "-enc", "UTF-8", "-layout", str(path.resolve()), "-"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=PDF_TIMEOUT_SECONDS,
@@ -453,7 +603,7 @@ def _extract_pdf(
         raise ImportContractError(
             "invalid_encoding", "PDF extractor did not return UTF-8"
         ) from exc
-    return _normalize_lines(text), "pdftotext", []
+    return _normalize_lines(_reading_order(text)), "pdftotext", []
 
 
 def _stable_id(prefix: str, source_id: str, kind: str, value: str) -> str:
@@ -501,6 +651,10 @@ def _body_parts(body: str) -> tuple[str, str, str]:
             pipe_parts[1],
             pipe_parts[2] if len(pipe_parts) == 3 else "",
         )
+    # German CVs commonly write "Firma - Rolle"; the organisation comes first.
+    dash = [part.strip() for part in re.split(r"\s+[-–—]\s+", body, maxsplit=1)]
+    if len(dash) == 2 and dash[0] and dash[1]:
+        return dash[1], dash[0], ""
     parts = [
         part.strip()
         for part in re.split(
@@ -631,7 +785,11 @@ def _normalize(
             r"(?:linkedin\.com/in/|github\.com/|https?://)", line, re.IGNORECASE
         ):
             field = "contact.url"
-        elif not profile_facts and line_no <= 3 and len(line.split()) <= 6:
+        elif (
+            not any(item.get("field") == "full_name" for item in profile_facts)
+            and line_no <= 60
+            and _looks_like_person_name(line)
+        ):
             field = "full_name"
         if field:
             claim_id = add_claim("profile", f"{field}: {value}", line_no)
@@ -681,7 +839,7 @@ def _normalize(
 
 
 def _normalize_atomic(
-    source_id: str, source_sha256: str, lines: list[str]
+    source_id: str, source_sha256: str, lines: list[str], engine: str = ""
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     sections: dict[str, list[tuple[int, str]]] = {key: [] for key in SECTION_ALIASES}
     sections["other"] = []
@@ -801,16 +959,43 @@ def _normalize_atomic(
         return record
 
     current_experience: dict[str, Any] | None = None
-    for line_no, line in sections["experience"]:
+    # A two-column CV prints the period in its own column, so a date can arrive
+    # a whole entry before the heading it belongs to. Dates that show up without
+    # a heading are queued and handed to the next heading that has none of its
+    # own; a date sharing its line with a heading always stays with it.
+    pending_periods: list[tuple[str, str]] = []
+    experience_entries = (
+        _repair_wrapped_lines(sections["experience"])
+        if engine == "pdftotext"
+        else sections["experience"]
+    )
+    for line_no, line in experience_entries:
+        bare = BARE_DATE_RANGE.match(line)
+        if bare:
+            pending_periods.append((bare.group("start"), bare.group("end")))
+            continue
         match = DATE_RANGE.match(line)
-        if match:
-            role, company, location = _body_parts(match.group("body"))
-            record_id = _stable_id("experience", source_id, "employment", line)
+        heading: str | None = None
+        period: tuple[str, str] | None = None
+        if match and not BULLET_START.match(match.group("body")):
+            heading = match.group("body")
+            period = (match.group("start"), match.group("end"))
+        elif match:
+            # Date plus bullet: the period belongs to a later heading, the text
+            # to the entry currently being read.
+            pending_periods.append((match.group("start"), match.group("end")))
+            line = match.group("body")
+        elif not BULLET_START.match(line) and pending_periods:
+            heading = line
+            period = pending_periods.pop(0)
+        if heading is not None and period is not None:
+            role, company, location = _body_parts(heading)
+            record_id = _stable_id("experience", source_id, "employment", heading)
             values = {
                 "role": role,
                 "company": company,
-                "start_date": _date(match.group("start")),
-                "end_date": _date(match.group("end")),
+                "start_date": _date(period[0]),
+                "end_date": _date(period[1]),
             }
             if location:
                 values["location"] = location
@@ -826,27 +1011,29 @@ def _normalize_atomic(
             record.setdefault("details", [])
             current_experience = record
         elif current_experience is not None:
-            statement = BULLET.sub("", line).strip()
-            if not statement:
-                continue
             record = current_experience
-            detail_key = statement.casefold()
             seen_details = experience_detail_keys.setdefault(record["id"], set())
-            if detail_key in seen_details:
-                continue
-            detail_index = len(record["details"])
-            fact_id, claim_id = add_fact(
-                "experience_detail",
-                record["id"],
-                f"details[{detail_index}]",
-                statement,
-                line_no,
-            )
-            record["claim_ids"].append(claim_id)
-            record["details"].append(
-                {"text": statement, "fact_id": fact_id, "claim_id": claim_id}
-            )
-            seen_details.add(detail_key)
+            # One extracted line can carry several bullet points.
+            for part in _split_inline_bullets(line):
+                statement = BULLET.sub("", part).strip()
+                if not statement:
+                    continue
+                detail_key = statement.casefold()
+                if detail_key in seen_details:
+                    continue
+                detail_index = len(record["details"])
+                fact_id, claim_id = add_fact(
+                    "experience_detail",
+                    record["id"],
+                    f"details[{detail_index}]",
+                    statement,
+                    line_no,
+                )
+                record["claim_ids"].append(claim_id)
+                record["details"].append(
+                    {"text": statement, "fact_id": fact_id, "claim_id": claim_id}
+                )
+                seen_details.add(detail_key)
         else:
             record_id = _stable_id("additional", source_id, "other", line)
             fact_id, claim_id = add_fact("other", record_id, "text", line, line_no)
@@ -906,7 +1093,11 @@ def _normalize_atomic(
             r"(?:linkedin\.com/in/|github\.com/|https?://)", line, re.IGNORECASE
         ):
             field = "contact.url"
-        elif not profile_facts and line_no <= 3 and len(line.split()) <= 6:
+        elif (
+            not any(item.get("field") == "full_name" for item in profile_facts)
+            and line_no <= 60
+            and _looks_like_person_name(line)
+        ):
             field = "full_name"
         else:
             field = ""
@@ -1006,7 +1197,7 @@ def _build_proposal(
     engine: str,
     warnings: list[dict[str, str]],
 ) -> dict[str, Any]:
-    normalized, conflicts = _normalize_atomic(source_id, source_sha256, lines)
+    normalized, conflicts = _normalize_atomic(source_id, source_sha256, lines, engine)
     text_sha = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
     result = {
         "contract": CONTRACT,

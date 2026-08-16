@@ -389,8 +389,11 @@ class CvImportContractTests(unittest.TestCase):
             ):
                 result = extract_cv(path)
         command = run.call_args.args[0]
+        # `-layout` keeps horizontal positions, which is what makes a sidebar
+        # separable from the main column; page breaks stay so each page is
+        # analysed on its own.
         self.assertEqual(
-            command[:4], ["/usr/bin/pdftotext", "-enc", "UTF-8", "-nopgbrk"]
+            command[:4], ["/usr/bin/pdftotext", "-enc", "UTF-8", "-layout"]
         )
         self.assertNotIn("private-name", json.dumps(result))
         self.assertEqual(result["proposal"]["skills"][0]["status"], "unverified")
