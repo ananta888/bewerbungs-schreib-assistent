@@ -844,6 +844,7 @@ def _normalize_atomic(
     sections: dict[str, list[tuple[int, str]]] = {key: [] for key in SECTION_ALIASES}
     sections["other"] = []
     current = "other"
+    named = False
     for line_no, line in enumerate(lines, start=1):
         heading = re.sub(r"[:\s]+$", "", line).casefold()
         matched = next(
@@ -852,8 +853,38 @@ def _normalize_atomic(
         )
         if matched:
             current = matched
-        else:
-            sections[current].append((line_no, line))
+            continue
+        # A document title or the candidate's name starts a new block. In a
+        # multi-column layout this is where the sidebar ends and the main
+        # column begins, and without the reset the last sidebar section keeps
+        # collecting: the name and the title were filed as certificates.
+        if heading in DOCUMENT_TITLES:
+            current = "other"
+            continue
+        # Inside an open section only an all-caps line may claim the name;
+        # a title-case entry there is far more likely to be content.
+        if (
+            not named
+            and _looks_like_person_name(line)
+            and (current == "other" or line.isupper())
+        ):
+            named = True
+            current = "other"
+            sections["other"].append((line_no, line))
+            continue
+        sections[current].append((line_no, line))
+
+    if engine == "pdftotext":
+        # Only a PDF cuts a sentence across lines; the other extractors deliver
+        # logical lines, where rejoining would glue unrelated entries together.
+        # Prose sections only: certificates, skills and the contact block are
+        # short label/value lines that rejoining would merge into one blob.
+        sections = {
+            key: _repair_wrapped_lines(value)
+            if key in {"experience", "projects", "education"}
+            else value
+            for key, value in sections.items()
+        }
 
     facts: list[dict[str, Any]] = []
     claims: list[dict[str, Any]] = []
@@ -964,12 +995,7 @@ def _normalize_atomic(
     # a heading are queued and handed to the next heading that has none of its
     # own; a date sharing its line with a heading always stays with it.
     pending_periods: list[tuple[str, str]] = []
-    experience_entries = (
-        _repair_wrapped_lines(sections["experience"])
-        if engine == "pdftotext"
-        else sections["experience"]
-    )
-    for line_no, line in experience_entries:
+    for line_no, line in sections["experience"]:
         bare = BARE_DATE_RANGE.match(line)
         if bare:
             pending_periods.append((bare.group("start"), bare.group("end")))
@@ -1095,7 +1121,6 @@ def _normalize_atomic(
             field = "contact.url"
         elif (
             not any(item.get("field") == "full_name" for item in profile_facts)
-            and line_no <= 60
             and _looks_like_person_name(line)
         ):
             field = "full_name"
