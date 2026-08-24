@@ -670,6 +670,31 @@ def _body_parts(body: str) -> tuple[str, str, str]:
     return (comma[0], comma[1], "") if len(comma) == 2 else (body.strip(), "", "")
 
 
+_ORG_HINT = re.compile(
+    r"\b(?:gmbh|ag|se|kg|ohg|ug|mbh|ltd|inc|llc|e\.?\s*v\.?)\b", re.IGNORECASE
+)
+_ROLE_HINT = re.compile(
+    r"\b(?:engineer|entwickler|consultant|manager|lead|architect|analyst|specialist|referent)\b",
+    re.IGNORECASE,
+)
+_TITLE_CASE_ORG = re.compile(
+    r"^[A-ZÄÖÜ][\w.&'’-]{1,40}(?:\s+[A-ZÄÖÜ0-9][\w.&'’-]{0,40}){0,5}$"
+)
+
+
+def _looks_like_company_line(line: str) -> bool:
+    value = line.strip()
+    if not value or len(value) > 80:
+        return False
+    if DATE_RANGE.match(value) or BARE_DATE_RANGE.match(value) or BULLET_START.match(value):
+        return False
+    if _ORG_HINT.search(value):
+        return True
+    if _ROLE_HINT.search(value):
+        return False
+    return bool(_TITLE_CASE_ORG.match(value))
+
+
 def _normalize(
     source_id: str, lines: list[str]
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -724,6 +749,10 @@ def _normalize(
                 }
             )
         elif experience:
+            if not experience[-1].get("company") and _looks_like_company_line(line):
+                experience[-1]["company"] = line.strip()
+                experience[-1]["claim_ids"].append(add_claim("employment", line, line_no))
+                continue
             statement = BULLET.sub("", line).strip()
             claim_id = add_claim("experience_detail", statement, line_no)
             experience[-1]["claim_ids"].append(claim_id)
@@ -1038,6 +1067,16 @@ def _normalize_atomic(
             current_experience = record
         elif current_experience is not None:
             record = current_experience
+            if not str(record.get("company") or "").strip() and _looks_like_company_line(line):
+                company = line.strip()
+                record["company"] = company
+                fact_id, claim_id = add_fact(
+                    "employment", record["id"], "company", company, line_no
+                )
+                record["field_fact_ids"]["company"] = fact_id
+                record["field_claim_ids"]["company"] = claim_id
+                record["claim_ids"].append(claim_id)
+                continue
             seen_details = experience_detail_keys.setdefault(record["id"], set())
             # One extracted line can carry several bullet points.
             for part in _split_inline_bullets(line):

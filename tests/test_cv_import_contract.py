@@ -537,6 +537,37 @@ class CvImportContractTests(unittest.TestCase):
         self.assertTrue(all(item["status"] == "unverified" for item in claims))
         self.assertEqual(validate_proposal(result), [])
 
+    def test_company_on_following_line_is_attached_to_role_only_heading(self) -> None:
+        text = (
+            "Berufserfahrung\n"
+            "01.2021 - 12.2022 Software Engineer\n"
+            "Synthetic Systems GmbH\n"
+            "- Built the test harness"
+        )
+        envelope = {
+            "contract": "extracted-cv-text",
+            "contract_version": "1.0",
+            "source": {
+                "sha256": "a" * 64,
+                "byte_size": len(text.encode()),
+                "media_type": "text/html",
+            },
+            "extraction": {
+                "engine": "root-pdf-passive",
+                "text": text,
+                "text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+                "warnings": [],
+            },
+        }
+
+        result = normalize_extracted_envelope(envelope)
+        record = result["proposal"]["experience"][0]
+        self.assertEqual(record["role"], "Software Engineer")
+        self.assertEqual(record["company"], "Synthetic Systems GmbH")
+        self.assertIn("company", record["field_fact_ids"])
+        self.assertEqual(len(record["details"]), 1)
+        self.assertEqual(validate_proposal(result), [])
+
     def test_pure_bullet_after_employment_is_ignored_without_empty_detail(self) -> None:
         text = "Experience\n2021-02 - present: Software Engineer | Synthetic GmbH\n-"
         envelope = {
