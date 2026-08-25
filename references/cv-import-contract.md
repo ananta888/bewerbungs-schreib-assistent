@@ -1,12 +1,13 @@
 # Existing CV import contract
 
 The import boundary accepts local HTML, PDF, DOCX, and ODT files and emits a versioned YAML
-proposal. It does not modify `candidate-profile.yaml` and it never contacts a remote service.
+proposal. It can additionally emit a self-contained static HTML review page. It does not modify
+`candidate-profile.yaml` and it never contacts a remote service.
 
 ```bash
 python scripts/cv_import_contract.py capabilities
-python scripts/cv_import_contract.py extract --input private/cv.docx --output .application-work/cv-import.yaml
-python scripts/cv_import_contract.py normalize-extracted --extracted-envelope - --output -
+python scripts/cv_import_contract.py extract --input private/cv.docx --output .application-work/cv-import.yaml --html-output .application-work/cv-import.html
+python scripts/cv_import_contract.py normalize-extracted --extracted-envelope - --output .application-work/cv-import.yaml --html-output .application-work/cv-import.html
 python scripts/cv_import_contract.py validate --proposal .application-work/cv-import.yaml
 python scripts/cv_import_contract.py validate-ai-structure --request -
 python scripts/cv_import_contract.py apply-ai-structure --request - --output -
@@ -17,6 +18,11 @@ The root application should invoke this CLI with an argument array (never a shel
 the output under `.application-work/`, and present records and atomic claims for individual review.
 Stable source and claim IDs are derived from the input hash and normalized source text. Re-importing
 identical input therefore produces identical IDs.
+
+`--html-output` is optional on both import commands. It writes an escaped, script-free page with
+the records, warnings, conflicts, and import counts so the result can be opened immediately in a
+browser. The page intentionally excludes the private line manifest and remains an unconfirmed,
+non-publishable display of the same proposal.
 
 Normalization collapses repeated case-insensitive copies of the same atomic token or structured
 record deterministically. The first occurrence and its source anchor are retained, and its status

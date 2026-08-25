@@ -248,6 +248,7 @@ class CvImportContractTests(unittest.TestCase):
         self.assertFalse(result["network_access"])
         self.assertFalse(result["macros_allowed"])
         self.assertEqual(result["claim_status"], "unverified")
+        self.assertIn("text/html", result["output_formats"])
         self.assertEqual(
             result["ai_structuring"]["contract"], "ai-cv-structure-proposal"
         )
@@ -397,6 +398,19 @@ class CvImportContractTests(unittest.TestCase):
         )
         self.assertNotIn("private-name", json.dumps(result))
         self.assertEqual(result["proposal"]["skills"][0]["status"], "unverified")
+
+    def test_pdf_reading_order_keeps_rare_text_that_extends_into_the_gutter(
+        self,
+    ) -> None:
+        left = "Common sidebar phrase"
+        right = "Right column content text"
+        lines = [f"{left:<40}{right}" for _ in range(8)]
+        lines.insert(4, f"{'Rare sidebar phrase extends-,':<40}{right}")
+
+        ordered = cv_contract._reading_order("\n".join(lines))
+
+        self.assertIn("Rare sidebar phrase extends-,", ordered)
+        self.assertEqual(ordered.count(right), 9)
 
     def test_pdf_active_content_and_extension_spoofing_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -764,6 +778,133 @@ class CvImportContractTests(unittest.TestCase):
         proposal = json.loads(process.stdout)
         self.assertEqual(
             [item["name"] for item in proposal["proposal"]["skills"]], ["TypeScript"]
+        )
+        self.assertEqual(validate_proposal(proposal), [])
+
+    def test_pdf_normalization_repairs_wrapped_prose_for_any_passive_engine(
+        self,
+    ) -> None:
+        text = (
+            "Experience\n"
+            "2024-01 - present: Engineer | Synthetic GmbH\n"
+            "• Built secure orchestration\n"
+            "of local agents."
+        )
+        encoded_text = text.encode("utf-8")
+        envelope = {
+            "contract": "extracted-cv-text",
+            "contract_version": "1.0",
+            "source": {
+                "sha256": "9" * 64,
+                "byte_size": len(encoded_text),
+                "media_type": "application/pdf",
+            },
+            "extraction": {
+                "engine": "integration-pdf-passive/1.0",
+                "text": text,
+                "text_sha256": hashlib.sha256(encoded_text).hexdigest(),
+                "warnings": [],
+            },
+        }
+
+        proposal = normalize_extracted_envelope(envelope)
+
+        self.assertEqual(
+            [
+                item["text"]
+                for item in proposal["proposal"]["experience"][0]["details"]
+            ],
+            ["Built secure orchestration of local agents."],
+        )
+        self.assertEqual(validate_proposal(proposal), [])
+
+    def test_structured_pdf_skill_sidebar_rejoins_wraps_without_heading_fragments(
+        self,
+    ) -> None:
+        text = (
+            "Skills\n"
+            "RESTful Web\n"
+            "Services, PostgreSQL\n"
+            "Tests / Qualität\n"
+            "Unit-, Komponenten-, System-, Integrations-, E2E- und\n"
+            "Regressionstests, Cypress.io\n"
+            "Open Source / KI\n"
+            "KI-Agenten-\n"
+            "Orchestrierung, RAG-\n"
+            "Kontextsystem\n"
+            "Branchen\n"
+            "Smart\n"
+            "Metering, Banking"
+        )
+        encoded_text = text.encode("utf-8")
+        envelope = {
+            "contract": "extracted-cv-text",
+            "contract_version": "1.0",
+            "source": {
+                "sha256": "8" * 64,
+                "byte_size": len(encoded_text),
+                "media_type": "application/pdf",
+            },
+            "extraction": {
+                "engine": "integration-pdf-passive/1.0",
+                "text": text,
+                "text_sha256": hashlib.sha256(encoded_text).hexdigest(),
+                "warnings": [],
+            },
+        }
+
+        proposal = normalize_extracted_envelope(envelope)
+
+        self.assertEqual(
+            [item["name"] for item in proposal["proposal"]["skills"]],
+            [
+                "RESTful Web Services",
+                "PostgreSQL",
+                "Unit-, Komponenten-, System-, Integrations-, E2E- und Regressionstests",
+                "Cypress.io",
+                "KI-Agenten-Orchestrierung",
+                "RAG-Kontextsystem",
+                "Smart Metering",
+                "Banking",
+            ],
+        )
+        self.assertEqual(validate_proposal(proposal), [])
+
+    def test_pdf_profile_and_strength_headings_group_wrapped_additional_facts(
+        self,
+    ) -> None:
+        text = (
+            "Profil\n"
+            "Experienced fullstack\n"
+            "engineer.\n"
+            "Stärken\n"
+            "Fast analysis\n"
+            "and reliable delivery.\n"
+            "Skills\n"
+            "Python"
+        )
+        encoded_text = text.encode("utf-8")
+        envelope = {
+            "contract": "extracted-cv-text",
+            "contract_version": "1.0",
+            "source": {
+                "sha256": "7" * 64,
+                "byte_size": len(encoded_text),
+                "media_type": "application/pdf",
+            },
+            "extraction": {
+                "engine": "integration-pdf-passive/1.0",
+                "text": text,
+                "text_sha256": hashlib.sha256(encoded_text).hexdigest(),
+                "warnings": [],
+            },
+        }
+
+        proposal = normalize_extracted_envelope(envelope)
+
+        self.assertEqual(
+            [item["text"] for item in proposal["proposal"]["additional_facts"]],
+            ["Experienced fullstack engineer.", "Fast analysis and reliable delivery."],
         )
         self.assertEqual(validate_proposal(proposal), [])
 
@@ -2268,6 +2409,46 @@ class CvImportContractTests(unittest.TestCase):
         self.assertEqual(summary["status"], "proposal_created")
         self.assertNotIn("Mustertechnik", process.stdout)
         self.assertEqual(validate_proposal(proposal), [])
+
+    def test_extract_cli_can_emit_a_safe_self_contained_review_html(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "encoded-cv.html"
+            proposal_output = Path(directory) / "proposal.yaml"
+            html_output = Path(directory) / "review.html"
+            source.write_text(
+                (
+                    "<!doctype html><html><body><h2>Skills</h2>"
+                    "<p>&lt;script&gt;alert('unsafe')&lt;/script&gt;, Python</p>"
+                    "</body></html>"
+                ),
+                encoding="utf-8",
+            )
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "cv_import_contract.py"),
+                    "extract",
+                    "--input",
+                    str(source),
+                    "--output",
+                    str(proposal_output),
+                    "--html-output",
+                    str(html_output),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            rendered = html_output.read_text(encoding="utf-8")
+
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertIn("Unbestätigter Importvorschlag", rendered)
+        self.assertIn("&lt;script&gt;alert(&#x27;unsafe&#x27;)&lt;/script&gt;", rendered)
+        self.assertNotIn("<script>", rendered)
+        self.assertNotIn("line_manifest", rendered)
+        self.assertIn("Python", rendered)
+        self.assertNotIn("unsafe", process.stdout)
 
 
 class RevokeAndSnapshotTest(unittest.TestCase):

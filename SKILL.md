@@ -33,6 +33,11 @@ extraction warnings, conflicts, employment periods, and atomic claims to the can
 merge the proposal into `candidate-profile.yaml` and do not upgrade any imported status until the
 candidate explicitly confirms the affected facts.
 
+When the user wants a directly visible result, pass `--html-output` to `extract` or
+`normalize-extracted` and return the generated self-contained HTML page alongside the private YAML
+proposal. The HTML page is a display artifact, not a confirmation or profile mutation, and must
+also remain under `.application-work/`.
+
 If the root application offers optional AI-assisted CV structuring, keep the provider call outside
 this submodule and require explicit user opt-in. Validate the provider output with the closed
 `ai-cv-structure-proposal` contract from [references/cv-import-contract.md](references/cv-import-contract.md).

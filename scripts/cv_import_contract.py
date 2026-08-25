@@ -87,6 +87,13 @@ SECTION_ALIASES = {
     "certifications": {"zertifikate", "certifications", "certificates"},
     "projects": {"projekte", "projects"},
 }
+PDF_SKILL_SUBSECTION_HEADINGS = {
+    "security / iam",
+    "tests / qualität",
+    "open source / ki",
+    "branchen",
+}
+PDF_ADDITIONAL_PARAGRAPH_HEADINGS = {"profil", "stärken"}
 DATE_TOKEN_PATTERN = (
     r"(?:\d{4}(?:[-/.](?:0?[1-9]|1[0-2]))?"
     r"|(?:0?[1-9]|1[0-2])[-/.]\d{4}"
@@ -153,6 +160,121 @@ def _split_inline_bullets(line: str) -> list[str]:
     """Splits several bullet points that share one extracted line."""
     parts = INLINE_BULLET.split(line)
     return [part for part in (item.strip() for item in parts) if part]
+
+
+def _split_skill_tokens(
+    entries: list[tuple[int, str]], *, structured_pdf_sidebar: bool
+) -> list[tuple[int, str]]:
+    """Return skill tokens without turning PDF layout labels into claims.
+
+    A narrow PDF sidebar commonly wraps one comma-separated skill paragraph
+    across several visual lines and inserts subsection labels inside the main
+    ``Skills`` section. The labels are structure, not candidate facts. We only
+    enable paragraph reassembly when one of the known labels is actually
+    present, leaving ordinary one-skill-per-line documents unchanged.
+    """
+
+    has_subsections = structured_pdf_sidebar and any(
+        re.sub(r"[:\s]+$", "", line).casefold()
+        in PDF_SKILL_SUBSECTION_HEADINGS
+        for _, line in entries
+    )
+    if not has_subsections:
+        return [
+            (line_no, token)
+            for line_no, line in entries
+            for token in (part.strip() for part in re.split(r"[,;•]", line))
+            if token
+        ]
+
+    groups: list[list[tuple[int, str]]] = []
+    current: list[tuple[int, str]] = []
+    for line_no, line in entries:
+        heading = re.sub(r"[:\s]+$", "", line).casefold()
+        if heading in PDF_SKILL_SUBSECTION_HEADINGS:
+            if current:
+                groups.append(current)
+                current = []
+            continue
+        current.append((line_no, line))
+    if current:
+        groups.append(current)
+
+    result: list[tuple[int, str]] = []
+    for group in groups:
+        paragraph = ""
+        for _, line in group:
+            stripped = line.strip()
+            if not paragraph:
+                paragraph = stripped
+            elif paragraph.endswith("-"):
+                paragraph += stripped
+            else:
+                paragraph += f" {stripped}"
+
+        tokens = [
+            part.strip() for part in re.split(r"[,;•]", paragraph) if part.strip()
+        ]
+        enumeration: list[str] = []
+        for token in tokens:
+            if enumeration:
+                enumeration.append(token)
+                if not token.endswith("-"):
+                    result.append((group[0][0], ", ".join(enumeration)))
+                    enumeration = []
+            elif token.endswith("-"):
+                enumeration = [token]
+            else:
+                result.append((group[0][0], token))
+        if enumeration:
+            result.append((group[0][0], ", ".join(enumeration)))
+    return result
+
+
+def _group_pdf_additional_paragraphs(
+    entries: list[tuple[int, str]],
+) -> list[tuple[int, str]]:
+    """Collapse wrapped profile/strength prose while preserving other fields."""
+
+    result: list[tuple[int, str]] = []
+    paragraph: list[tuple[int, str]] = []
+    collecting = False
+    previous_line_no: int | None = None
+
+    def flush() -> None:
+        nonlocal paragraph
+        if not paragraph:
+            return
+        value = ""
+        for _, line in paragraph:
+            if not value:
+                value = line.strip()
+            elif value.endswith("-"):
+                value += line.strip()
+            else:
+                value += f" {line.strip()}"
+        result.append((paragraph[0][0], value))
+        paragraph = []
+
+    for line_no, line in entries:
+        if (
+            collecting
+            and previous_line_no is not None
+            and line_no != previous_line_no + 1
+        ):
+            flush()
+            collecting = False
+        heading = re.sub(r"[:\s]+$", "", line).casefold()
+        if heading in PDF_ADDITIONAL_PARAGRAPH_HEADINGS:
+            flush()
+            collecting = True
+        elif collecting:
+            paragraph.append((line_no, line))
+        else:
+            result.append((line_no, line))
+        previous_line_no = line_no
+    flush()
+    return result
 
 
 class ImportContractError(ValueError):
@@ -244,7 +366,7 @@ def capabilities() -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "input_formats": sorted(set(ALLOWED_MEDIA_TYPES.values())),
         "max_input_bytes": MAX_INPUT_BYTES,
-        "output_formats": ["application/yaml", "application/json"],
+        "output_formats": ["application/yaml", "application/json", "text/html"],
         "claim_status": "unverified",
         "commands": [
             "capabilities",
@@ -394,7 +516,13 @@ def _reading_order(text: str) -> str:
         if not any(line.strip() for line in lines):
             continue
         columns = _page_columns(lines)
-        for begin, end in columns:
+        page_width = max((len(line) for line in lines), default=0)
+        for index, (begin, _) in enumerate(columns):
+            # Occupancy identifies the stable body of each column. A rare long
+            # line may extend farther into the otherwise empty gutter (often
+            # only by a comma or hyphen), so slice until the next column starts
+            # instead of clipping at the dense-span boundary.
+            end = columns[index + 1][0] if index + 1 < len(columns) else page_width
             column = [line[begin:end].rstrip() for line in lines]
             if any(part.strip() for part in column):
                 ordered.extend(column)
@@ -868,7 +996,11 @@ def _normalize(
 
 
 def _normalize_atomic(
-    source_id: str, source_sha256: str, lines: list[str], engine: str = ""
+    source_id: str,
+    source_sha256: str,
+    lines: list[str],
+    engine: str = "",
+    media_type: str = "",
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     sections: dict[str, list[tuple[int, str]]] = {key: [] for key in SECTION_ALIASES}
     sections["other"] = []
@@ -903,17 +1035,21 @@ def _normalize_atomic(
             continue
         sections[current].append((line_no, line))
 
-    if engine == "pdftotext":
+    if media_type == "application/pdf":
         # Only a PDF cuts a sentence across lines; the other extractors deliver
         # logical lines, where rejoining would glue unrelated entries together.
-        # Prose sections only: certificates, skills and the contact block are
-        # short label/value lines that rejoining would merge into one blob.
+        # This must depend on the source type rather than the extractor name:
+        # the integration app and the standalone skill use different passive
+        # PDF engines but feed the same evidence normalization contract.
+        # Prose sections only: certificates and the contact block are short
+        # label/value lines that rejoining would merge into one blob.
         sections = {
             key: _repair_wrapped_lines(value)
             if key in {"experience", "projects", "education"}
             else value
             for key, value in sections.items()
         }
+        sections["other"] = _group_pdf_additional_paragraphs(sections["other"])
 
     facts: list[dict[str, Any]] = []
     claims: list[dict[str, Any]] = []
@@ -1134,20 +1270,27 @@ def _normalize_atomic(
                 line_no,
             )
 
-    for collection, category, field in (
-        ("skills", "skill", "name"),
-        ("languages", "language", "language"),
+    for line_no, token in _split_skill_tokens(
+        sections["skills"], structured_pdf_sidebar=media_type == "application/pdf"
     ):
-        for line_no, line in sections[collection]:
-            for token in (part.strip() for part in re.split(r"[,;•]", line)):
-                if token:
-                    create_record(
-                        collection,
-                        category,
-                        _stable_id(category, source_id, category, token),
-                        {field: token},
-                        line_no,
-                    )
+        create_record(
+            "skills",
+            "skill",
+            _stable_id("skill", source_id, "skill", token),
+            {"name": token},
+            line_no,
+        )
+
+    for line_no, line in sections["languages"]:
+        for token in (part.strip() for part in re.split(r"[,;•]", line)):
+            if token:
+                create_record(
+                    "languages",
+                    "language",
+                    _stable_id("language", source_id, "language", token),
+                    {"language": token},
+                    line_no,
+                )
 
     for line_no, line in sections["other"]:
         if re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", line):
@@ -1261,7 +1404,9 @@ def _build_proposal(
     engine: str,
     warnings: list[dict[str, str]],
 ) -> dict[str, Any]:
-    normalized, conflicts = _normalize_atomic(source_id, source_sha256, lines, engine)
+    normalized, conflicts = _normalize_atomic(
+        source_id, source_sha256, lines, engine, media_type
+    )
     text_sha = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
     result = {
         "contract": CONTRACT,
@@ -4250,6 +4395,202 @@ def _write_yaml_atomic(path: Path, data: dict[str, Any]) -> None:
         raise
 
 
+def _write_text_atomic(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+        os.replace(temporary_name, path)
+    except Exception:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+
+
+def _render_review_html(data: dict[str, Any]) -> str:
+    errors = validate_proposal(data)
+    if errors:
+        raise ImportContractError("invalid_proposal", "; ".join(errors))
+
+    proposal = data["proposal"]
+    extraction = data["extraction"]
+
+    def escape(value: Any) -> str:
+        return html.escape(str(value), quote=True)
+
+    def date_range(item: dict[str, Any]) -> str:
+        start = str(item.get("start_date") or "").strip()
+        end = str(item.get("end_date") or "").strip()
+        if start and end:
+            return f"{escape(start)} – {escape(end)}"
+        return escape(start or end)
+
+    def empty_state(label: str) -> str:
+        return f'<p class="empty">{escape(label)}</p>'
+
+    def record_cards(
+        collection: str, *, title_field: str, subtitle_fields: tuple[str, ...] = ()
+    ) -> str:
+        cards: list[str] = []
+        for record in proposal[collection]:
+            title = escape(record.get(title_field) or "Ohne Bezeichnung")
+            subtitle_parts = [
+                escape(record.get(field))
+                for field in subtitle_fields
+                if str(record.get(field) or "").strip()
+            ]
+            period = date_range(record)
+            if period:
+                subtitle_parts.append(period)
+            subtitle = (
+                f'<p class="meta">{" · ".join(subtitle_parts)}</p>'
+                if subtitle_parts
+                else ""
+            )
+            details = record.get("details") or []
+            detail_html = ""
+            if details:
+                detail_html = '<ul class="details">' + "".join(
+                    f"<li>{escape(item['text'])}</li>" for item in details
+                ) + "</ul>"
+            cards.append(
+                '<article class="record">'
+                f"<h3>{title}</h3>{subtitle}{detail_html}"
+                '<span class="status">unbestätigt</span>'
+                "</article>"
+            )
+        return "".join(cards) or empty_state("Keine Einträge erkannt.")
+
+    profile_rows = "".join(
+        '<div class="profile-row">'
+        f"<dt>{escape(item['field'])}</dt><dd>{escape(item['value'])}</dd>"
+        "</div>"
+        for item in proposal["profile"]["facts"]
+    ) or empty_state("Keine Profilfelder erkannt.")
+
+    skills = "".join(
+        f'<li class="chip">{escape(item["name"])}</li>'
+        for item in proposal["skills"]
+    ) or '<li class="empty">Keine Skills erkannt.</li>'
+    languages = "".join(
+        '<li class="chip">'
+        f'{escape(item["language"])}'
+        + (
+            f' <span class="muted">({escape(item["level"])})</span>'
+            if str(item.get("level") or "").strip()
+            else ""
+        )
+        + "</li>"
+        for item in proposal["languages"]
+    ) or '<li class="empty">Keine Sprachen erkannt.</li>'
+    additional = "".join(
+        f"<li>{escape(item['text'])}</li>" for item in proposal["additional_facts"]
+    ) or '<li class="empty">Keine zusätzlichen Fakten erkannt.</li>'
+
+    warnings = extraction.get("warnings") or []
+    warning_rows = "".join(
+        '<li><strong>'
+        f"{escape(item['code'])}</strong>: {escape(item['detail'])}</li>"
+        for item in warnings
+    ) or '<li class="ok">Keine Extraktionswarnungen.</li>'
+    conflicts = extraction.get("conflicts") or []
+    conflict_rows = "".join(
+        '<li><strong>'
+        f"{escape(item.get('code', 'Konflikt'))}</strong>: "
+        f"{escape(item.get('detail', ''))}</li>"
+        for item in conflicts
+    ) or '<li class="ok">Keine erkannten Konflikte.</li>'
+
+    record_count = sum(
+        len(proposal[collection])
+        for collection in (
+            "experience",
+            "projects",
+            "education",
+            "certifications",
+            "skills",
+            "languages",
+        )
+    ) + len(proposal["additional_facts"])
+
+    return f"""<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:">
+  <title>CV-Import – direkte Ergebnisansicht</title>
+  <style>
+    :root {{ color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #172033; background: #edf2f7; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; }}
+    main {{ width: min(1120px, calc(100% - 32px)); margin: 32px auto 64px; }}
+    header, section {{ background: #fff; border: 1px solid #dce3ec; border-radius: 18px; box-shadow: 0 10px 28px rgba(23, 32, 51, .07); }}
+    header {{ padding: 28px; border-top: 6px solid #d97706; }}
+    section {{ padding: 24px; margin-top: 18px; }}
+    h1, h2, h3, p {{ margin-top: 0; }}
+    h1 {{ font-size: clamp(1.8rem, 4vw, 3rem); margin-bottom: 10px; }}
+    h2 {{ font-size: 1.25rem; margin-bottom: 18px; }}
+    h3 {{ font-size: 1.05rem; margin-bottom: 6px; }}
+    .eyebrow {{ color: #9a5800; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; font-size: .75rem; }}
+    .lead {{ color: #4c5b70; max-width: 76ch; line-height: 1.6; }}
+    .notice {{ padding: 12px 14px; border-radius: 10px; background: #fff7e8; color: #71420a; font-weight: 650; }}
+    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-top: 22px; }}
+    .metric {{ background: #f5f8fb; border-radius: 12px; padding: 14px; }}
+    .metric strong {{ display: block; font-size: 1.6rem; }}
+    .metric span, .meta, .muted, .technical {{ color: #68758a; }}
+    .technical {{ font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .78rem; overflow-wrap: anywhere; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }}
+    .record {{ position: relative; border: 1px solid #e1e7ef; border-radius: 13px; padding: 18px; background: #fbfcfe; }}
+    .record .status {{ display: inline-block; margin-top: 8px; color: #995b0c; font-size: .75rem; font-weight: 750; }}
+    .details, .plain-list {{ padding-left: 20px; line-height: 1.55; }}
+    .profile {{ margin: 0; }}
+    .profile-row {{ display: grid; grid-template-columns: minmax(130px, .4fr) 1fr; gap: 16px; padding: 10px 0; border-bottom: 1px solid #edf0f4; }}
+    .profile-row:last-child {{ border-bottom: 0; }}
+    dt {{ font-weight: 750; }} dd {{ margin: 0; overflow-wrap: anywhere; }}
+    .chips {{ display: flex; flex-wrap: wrap; gap: 8px; padding: 0; list-style: none; }}
+    .chip {{ padding: 7px 11px; border-radius: 999px; background: #eaf2ff; color: #174c87; }}
+    .checks {{ display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }}
+    .ok {{ color: #1d6a43; }} .empty {{ color: #778398; font-style: italic; }}
+    @media (max-width: 700px) {{ main {{ width: min(100% - 18px, 1120px); margin-top: 10px; }} header, section {{ padding: 18px; border-radius: 13px; }} .checks {{ grid-template-columns: 1fr; }} .profile-row {{ grid-template-columns: 1fr; gap: 4px; }} }}
+    @media print {{ :root {{ background: #fff; }} main {{ width: 100%; margin: 0; }} header, section {{ box-shadow: none; break-inside: avoid; }} }}
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <span class="eyebrow">Direkte Ergebnisansicht</span>
+    <h1>Unbestätigter Importvorschlag</h1>
+    <p class="lead">Der Lebenslauf wurde lokal und ohne Netzwerkzugriff ausgewertet. Diese HTML-Seite kann sofort geöffnet werden; zum Ansehen sind keine manuellen Wechsel oder Freigaben nötig.</p>
+    <p class="notice">Die erkannten Angaben wurden nicht in ein Kandidatenprofil übernommen und bleiben bis zu einer ausdrücklichen Bestätigung nicht veröffentlichbar.</p>
+    <div class="summary">
+      <div class="metric"><strong>{len(proposal['facts'])}</strong><span>atomare Fakten</span></div>
+      <div class="metric"><strong>{len(proposal['claims'])}</strong><span>Claims</span></div>
+      <div class="metric"><strong>{record_count}</strong><span>sichtbare Einträge</span></div>
+      <div class="metric"><strong>{len(warnings)}</strong><span>Warnungen</span></div>
+      <div class="metric"><strong>{len(conflicts)}</strong><span>Konflikte</span></div>
+    </div>
+    <p class="technical">Extraktor: {escape(extraction['engine'])} · Zeilen: {escape(extraction['line_count'])}<br>Quell-SHA-256: {escape(data['source']['sha256'])}</p>
+  </header>
+
+  <section><h2>Profilfelder</h2><dl class="profile">{profile_rows}</dl></section>
+  <section><h2>Berufserfahrung</h2><div class="grid">{record_cards('experience', title_field='role', subtitle_fields=('company', 'location'))}</div></section>
+  <section><h2>Ausbildung</h2><div class="grid">{record_cards('education', title_field='name')}</div></section>
+  <section><h2>Projekte</h2><div class="grid">{record_cards('projects', title_field='name')}</div></section>
+  <section><h2>Zertifikate</h2><div class="grid">{record_cards('certifications', title_field='name')}</div></section>
+  <section><h2>Skills</h2><ul class="chips">{skills}</ul></section>
+  <section><h2>Sprachen</h2><ul class="chips">{languages}</ul></section>
+  <section><h2>Zusätzliche erkannte Angaben</h2><ul class="plain-list">{additional}</ul></section>
+  <section><h2>Technische Prüfung</h2><div class="checks"><div><h3>Warnungen</h3><ul class="plain-list">{warning_rows}</ul></div><div><h3>Konflikte</h3><ul class="plain-list">{conflict_rows}</ul></div></div></section>
+</main>
+</body>
+</html>
+"""
+
+
 def _read_stdin_utf8() -> str:
     """Read the stdio contract as UTF-8 bytes, independent of the host locale."""
     binary_stream = getattr(sys.stdin, "buffer", None)
@@ -4325,9 +4666,11 @@ def main() -> int:
     extract = commands.add_parser("extract")
     extract.add_argument("--input", required=True)
     extract.add_argument("--output", required=True)
+    extract.add_argument("--html-output")
     normalize = commands.add_parser("normalize-extracted")
     normalize.add_argument("--extracted-envelope", required=True)
     normalize.add_argument("--output", required=True)
+    normalize.add_argument("--html-output")
     extend = commands.add_parser("extend-user-facts")
     extend.add_argument("--proposal", required=True)
     extend.add_argument("--additions", required=True)
@@ -4374,6 +4717,8 @@ def main() -> int:
         elif args.command == "extract":
             proposal = extract_cv(args.input)
             _write_yaml_atomic(Path(args.output), proposal)
+            if args.html_output:
+                _write_text_atomic(Path(args.html_output), _render_review_html(proposal))
             result = {
                 "contract": CONTRACT,
                 "contract_version": CONTRACT_VERSION,
@@ -4381,6 +4726,7 @@ def main() -> int:
                 "source_id": proposal["source"]["id"],
                 "claim_count": len(proposal["proposal"]["claims"]),
                 "requires_confirmation": True,
+                "html_created": bool(args.html_output),
             }
         elif args.command == "normalize-extracted":
             envelope_text = (
@@ -4390,6 +4736,8 @@ def main() -> int:
             )
             envelope = _load_contract_json(envelope_text)
             proposal = normalize_extracted_envelope(envelope)
+            if args.html_output:
+                _write_text_atomic(Path(args.html_output), _render_review_html(proposal))
             if args.output == "-":
                 _write_stdout_json(proposal)
                 return 0
@@ -4401,6 +4749,7 @@ def main() -> int:
                 "source_id": proposal["source"]["id"],
                 "claim_count": len(proposal["proposal"]["claims"]),
                 "requires_confirmation": True,
+                "html_created": bool(args.html_output),
             }
         elif args.command == "extend-user-facts":
             proposal = yaml.safe_load(Path(args.proposal).read_text(encoding="utf-8"))
