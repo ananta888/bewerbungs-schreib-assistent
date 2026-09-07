@@ -4271,7 +4271,11 @@ def _adopt_confirmed_locked(
 
     adopted_record_ids: list[str] = []
     required_fields = {
-        "experience": {"role", "company", "start_date", "end_date"},
+        # A company is legitimately absent for entries such as self-employment,
+        # care work, or training periods. If the source contains a company fact,
+        # it still has to be confirmed below; only a genuinely absent field is
+        # optional.
+        "experience": {"role", "start_date", "end_date"},
         "projects": {"name"},
         "education": {"name"},
         "certifications": {"name"},
@@ -4288,9 +4292,12 @@ def _adopt_confirmed_locked(
     ):
         for record in proposal[collection]:
             field_fact_ids = record["field_fact_ids"]
+            record_required_fields = set(required_fields[collection])
+            if collection == "experience" and "company" in field_fact_ids:
+                record_required_fields.add("company")
             if any(
                 field_fact_ids.get(field) not in selected_facts
-                for field in required_fields[collection]
+                for field in record_required_fields
             ):
                 continue
             adopted = copy.deepcopy(record)

@@ -741,6 +741,60 @@ class CvImportContractTests(unittest.TestCase):
         self.assertEqual(adopted["status"], "user_confirmed")
         self.assertEqual(len(adopted["claim_ids"]), 4)
 
+    def test_adoption_keeps_employment_when_source_has_no_company(self) -> None:
+        envelope = {
+            "contract": "extracted-cv-text",
+            "contract_version": "1.0",
+            "source": {
+                "sha256": "d" * 64,
+                "byte_size": 1,
+                "media_type": "text/html",
+            },
+            "extraction": {
+                "engine": "test",
+                "text": (
+                    "Berufserfahrung\n"
+                    "03/2025 - heute Selbstständig / Weiterbildung / Open Source\n"
+                    "- Entwicklung eines Open-Source-Projekts."
+                ),
+            },
+        }
+        envelope["extraction"]["text_sha256"] = hashlib.sha256(
+            envelope["extraction"]["text"].encode("utf-8")
+        ).hexdigest()
+        proposal = normalize_extracted_envelope(envelope)
+        employment = proposal["proposal"]["experience"][0]
+        self.assertNotIn("company", employment["field_fact_ids"])
+        decisions = [
+            {
+                "fact_id": fact["id"],
+                "decision": "confirm",
+                "explicitly_confirmed": True,
+                "confirmation_origin": "explicit_local_user_action",
+            }
+            for fact in proposal["proposal"]["facts"]
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            candidate_path = Path(directory) / "candidate.yaml"
+            candidate_path.write_text(
+                (FIXTURES / "valid-candidate.yaml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            digest = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+            adopted = adopt_confirmed(proposal, candidate_path, decisions, digest)
+            candidate = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(adopted["adopted_record_ids"], [employment["id"]])
+        adopted_experience = next(
+            item for item in candidate["experience"] if item["id"] == employment["id"]
+        )
+        self.assertEqual(
+            adopted_experience["role"],
+            "Selbstständig / Weiterbildung / Open Source",
+        )
+        self.assertEqual(adopted_experience["company"], "")
+        self.assertEqual(len(adopted_experience["details"]), 1)
+
     def test_normalize_cli_supports_private_stdin_stdout_transport(self) -> None:
         text = "Skills\nTypeScript, TypeScript"
         envelope = {

@@ -1,0 +1,53 @@
+{
+  "$schema": "../todo.track.schema.json",
+  "version": 1,
+  "owner": "bewerbungs-schreib-assistent",
+  "track": "publishable-evidence-snapshot",
+  "created": "2026-08-25",
+  "updated": "2026-08-26",
+  "purpose": "Strukturierte, ausgabespezifisch freigegebene Kandidatenevidenz für getrennte Author-, ATS-, Stil- und Finalizer-Kontexte bereitstellen.",
+  "goal": "Der Maschinenvertrag liefert Claims und verknüpfte CV-Strukturdaten vollständig, ohne nicht freigegebene Fakten oder Identitätsdaten implizit zu veröffentlichen.",
+  "status_scale": ["todo", "in_progress", "partial", "blocked", "done"],
+  "priority_scale": ["low", "medium", "high"],
+  "risk_scale": ["low", "medium", "high"],
+  "milestones": [
+    { "id": "M1", "title": "Evidence-Snapshot", "task_ids": ["PES-01"], "status": "done" }
+  ],
+  "tasks": [
+    {
+      "id": "PES-01",
+      "title": "Ausgabespezifischen Evidence-Snapshot veröffentlichen",
+      "status": "done",
+      "priority": "high",
+      "risk": "high",
+      "progress_percent": 100,
+      "acceptance_criteria": [
+        "Nur verified- oder user_confirmed-Claims mit Freigabe für den angeforderten Dokumenttyp erscheinen.",
+        "Experience, Projects, Skills, Education, Certifications und Languages bleiben mit ihren Claim-Bindungen strukturiert erhalten.",
+        "Nicht freigegebene oder nicht vollständig claim-gebundene Records werden nicht ausgegeben.",
+        "Der CLI-Vertrag ist durch Unit-Tests und Profilvalidierung belegt."
+      ],
+      "evidence": [
+        "scripts/profile_contract.py evidence veröffentlicht den geschlossenen candidate-evidence-snapshot@1.0-Vertrag.",
+        "tests/test_skill.py prüft Status-, Output-, Record- und Claim-Bindungsfilter sowie die geschlossene CLI-Ausgabe.",
+        "Der Snapshot wurde in zwei getrennten vollständigen Integrationsläufen erfolgreich an Evidence, Author, ATS, Stil und Finalizer übergeben.",
+        "python -m unittest discover -s tests: 112/112 erfolgreich."
+      ]
+    }
+  ],
+  "critical_path_tasks": ["PES-01"],
+  "tasks_status_summary": {
+    "total": 1,
+    "by_status": { "todo": 0, "in_progress": 0, "partial": 0, "blocked": 0, "done": 1 },
+    "progress_percent_done": 100,
+    "by_priority": { "high": 1, "medium": 0, "low": 0 },
+    "by_risk": { "high": 1, "medium": 0, "low": 0 },
+    "critical_path": { "total": 1, "done": 1, "remaining": 0 },
+    "milestones": { "total": 1, "todo": 0, "in_progress": 0, "blocked": 0, "done": 1 }
+  },
+  "progress_summary": { "state": "done", "todo_remaining": 0, "in_progress": 0, "partial": 0, "blocked": 0, "done": 1 },
+  "summary_notes": [
+    "Der Snapshot enthält keine Suchpräferenzen und ersetzt keine ausgabespezifische Evidence-Prüfung.",
+    "HTML-Ausgaben bleiben getrennt: Der Snapshot enthält ausschließlich veröffentlichbare Fachdaten, keine Identität und keine Darstellung."
+  ]
+}

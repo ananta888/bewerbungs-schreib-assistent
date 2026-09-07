@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -13,6 +14,61 @@ PUBLISHABLE_STATUSES = {"verified", "user_confirmed"}
 VALID_OUTPUTS = {"cv", "cover_letter", "email", "linkedin", "interview"}
 ID_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 DATE_PATTERN = re.compile(r"^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?$")
+HTML_DOCUMENT_PATTERN = re.compile(
+    r"<(?:!doctype\s+html|html\b|body\b|main\b|article\b|section\b|h[1-6]\b|p\b|li\b)",
+    re.IGNORECASE,
+)
+
+
+class _VisibleHtmlTextParser(HTMLParser):
+    BLOCK_TAGS = {
+        "address", "article", "aside", "blockquote", "br", "dd", "div", "dl", "dt",
+        "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li", "main",
+        "nav", "ol", "p", "pre", "section", "table", "td", "th", "tr", "ul",
+    }
+    IGNORED_TAGS = {"head", "script", "style", "template", "noscript", "svg", "canvas"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.ignored_depth = 0
+
+    def handle_starttag(self, tag: str, _attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.casefold()
+        if tag in self.IGNORED_TAGS:
+            self.ignored_depth += 1
+            return
+        if self.ignored_depth == 0 and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.casefold()
+        if tag in self.IGNORED_TAGS and self.ignored_depth > 0:
+            self.ignored_depth -= 1
+            return
+        if self.ignored_depth == 0 and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self.ignored_depth == 0:
+            self.parts.append(data)
+
+
+def visible_document_text(document: str) -> str:
+    """Return visible HTML body text while leaving non-HTML drafts unchanged."""
+    if not HTML_DOCUMENT_PATTERN.search(document):
+        return document
+    parser = _VisibleHtmlTextParser()
+    parser.feed(document)
+    parser.close()
+    text = "".join(parser.parts)
+    text = re.sub(r"[^\S\n]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def load_yaml(path: str | Path) -> dict[str, Any]:

@@ -12,8 +12,10 @@ from typing import Any
 
 try:
     from .audit_claims import EVIDENCE_PATTERN
+    from .common import visible_document_text
 except ImportError:  # Direct script execution.
     from audit_claims import EVIDENCE_PATTERN
+    from common import visible_document_text
 
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -21,6 +23,7 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 def plain_text(document: str) -> str:
     text = EVIDENCE_PATTERN.sub("", document)
+    text = visible_document_text(text)
     text = re.sub(r"\[([^]]+)]\([^)]+\)", r"\1", text)
     text = re.sub(r"^\s{0,3}(?:#{1,6}|[-*+])\s+", "", text, flags=re.MULTILINE)
     text = text.replace("`", "")

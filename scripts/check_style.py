@@ -6,10 +6,10 @@ from collections import Counter
 from pathlib import Path
 
 try:
-    from .common import format_errors, load_yaml, validate_style
+    from .common import format_errors, load_yaml, validate_style, visible_document_text
     from .audit_claims import EVIDENCE_PATTERN
 except ImportError:  # Direct script execution.
-    from common import format_errors, load_yaml, validate_style
+    from common import format_errors, load_yaml, validate_style, visible_document_text
     from audit_claims import EVIDENCE_PATTERN
 
 
@@ -24,7 +24,7 @@ def check_style(style: dict, document: str, document_type: str) -> list[str]:
         errors.append(f"document type {document_type!r} is not configured")
         return errors
 
-    clean = EVIDENCE_PATTERN.sub("", document)
+    clean = visible_document_text(EVIDENCE_PATTERN.sub("", document))
     folded = clean.casefold()
     avoid_patterns = style.get("style_profile", {}).get("avoid_patterns", [])
     matches: list[str] = []
@@ -44,9 +44,14 @@ def check_style(style: dict, document: str, document_type: str) -> list[str]:
         if len(words) > maximum:
             preview = " ".join(words[:8])
             errors.append(f"sentence exceeds {maximum} words ({len(words)}): {preview}...")
-        first = words[0].casefold()
-        if first not in {"und", "oder", "aber"}:
-            sentence_starts.append(first)
+        # CV headings, dates and compact skill lines are permitted fragments, not
+        # prose sentences. Exact role titles often repeat and must not be rewritten
+        # merely to satisfy the prose-variation rule.
+        is_cv_fragment = document_type == "cv" and not re.search(r"[.!?]\s*$", sentence)
+        if not is_cv_fragment:
+            first = words[0].casefold()
+            if first not in {"und", "oder", "aber"}:
+                sentence_starts.append(first)
 
     allowed_repeats = style.get("quality_thresholds", {}).get("max_repeated_sentence_starts", 2)
     repeated = sorted(word for word, count in Counter(sentence_starts).items() if count > allowed_repeats)

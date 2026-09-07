@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import re
 from datetime import date, datetime, timezone
@@ -36,6 +37,15 @@ ALLOWED_CLAIM_FIELDS = {
     "valid_to",
 }
 PUBLISHABLE_STATUSES = {"verified", "user_confirmed"}
+OUTPUT_TYPES = {"cv", "cover_letter", "email", "linkedin", "interview"}
+EVIDENCE_COLLECTIONS = (
+    "experience",
+    "projects",
+    "skills",
+    "education",
+    "certifications",
+    "languages",
+)
 
 
 def profile_summary(candidate_path: str | Path) -> dict[str, Any]:
@@ -161,6 +171,7 @@ def profile_summary(candidate_path: str | Path) -> dict[str, Any]:
         "claims": [
             {
                 "id": claim.get("id"),
+                "category": claim.get("category"),
                 "statement": claim.get("statement"),
                 "status": claim.get("status"),
                 "evidence_refs": claim.get("evidence_refs", []),
@@ -171,6 +182,77 @@ def profile_summary(candidate_path: str | Path) -> dict[str, Any]:
             for claim in candidate.get("claims", [])
             if isinstance(claim, dict)
         ],
+    }
+
+
+def profile_evidence(
+    candidate_path: str | Path, output_type: str
+) -> dict[str, Any]:
+    """Return only publishable claims and fully claim-bound structured records."""
+    if output_type not in OUTPUT_TYPES:
+        raise ValueError("Unsupported candidate evidence output type")
+    candidate = load_yaml(candidate_path)
+    errors = validate_candidate(candidate)
+    if errors:
+        return {
+            "contract": "candidate-evidence-snapshot",
+            "contract_version": "1.0",
+            "output_type": output_type,
+            "valid": False,
+            "errors": errors,
+            "claims": [],
+            "records": {collection: [] for collection in EVIDENCE_COLLECTIONS},
+        }
+
+    publishable_claims: dict[str, dict[str, Any]] = {}
+    for claim in candidate.get("claims", []):
+        if not isinstance(claim, dict):
+            continue
+        claim_id = str(claim.get("id", ""))
+        if (
+            claim_id
+            and claim.get("status") in PUBLISHABLE_STATUSES
+            and output_type in claim.get("allowed_outputs", [])
+            and (
+                claim.get("status") == "user_confirmed"
+                or bool(claim.get("evidence_refs"))
+            )
+        ):
+            publishable_claims[claim_id] = claim
+
+    records: dict[str, list[dict[str, Any]]] = {}
+    for collection in EVIDENCE_COLLECTIONS:
+        projected: list[dict[str, Any]] = []
+        for item in candidate.get(collection, []):
+            if not isinstance(item, dict) or item.get("status") not in PUBLISHABLE_STATUSES:
+                continue
+            claim_ids = [str(value) for value in item.get("claim_ids", [])]
+            if not claim_ids or any(value not in publishable_claims for value in claim_ids):
+                continue
+            projected.append(copy.deepcopy(item))
+        records[collection] = projected
+
+    return {
+        "contract": "candidate-evidence-snapshot",
+        "contract_version": "1.0",
+        "output_type": output_type,
+        "valid": True,
+        "errors": [],
+        "claims": [
+            {
+                "id": claim.get("id"),
+                "category": claim.get("category"),
+                "statement": claim.get("statement"),
+                "status": claim.get("status"),
+                "evidence_refs": claim.get("evidence_refs", []),
+                "allowed_outputs": claim.get("allowed_outputs", []),
+                "tags": claim.get("tags", []),
+                "valid_from": claim.get("valid_from"),
+                "valid_to": claim.get("valid_to"),
+            }
+            for claim in publishable_claims.values()
+        ],
+        "records": records,
     }
 
 
@@ -354,6 +436,9 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     show = subparsers.add_parser("show")
     show.add_argument("--candidate", required=True)
+    evidence = subparsers.add_parser("evidence")
+    evidence.add_argument("--candidate", required=True)
+    evidence.add_argument("--output-type", required=True, choices=sorted(OUTPUT_TYPES))
     patch = subparsers.add_parser("patch")
     patch.add_argument("--candidate", required=True)
     patch.add_argument("--operations", required=True)
@@ -368,6 +453,8 @@ def main() -> int:
     try:
         if args.command == "show":
             result = profile_summary(args.candidate)
+        elif args.command == "evidence":
+            result = profile_evidence(args.candidate, args.output_type)
         elif args.command == "patch":
             operations = json.loads(Path(args.operations).read_text(encoding="utf-8"))
             if not isinstance(operations, list):

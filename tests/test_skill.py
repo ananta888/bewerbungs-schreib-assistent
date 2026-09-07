@@ -33,6 +33,7 @@ from scripts.pipeline_contract import capabilities, finalize_pipeline, pipeline_
 from scripts.profile_contract import (
     add_import_proposals,
     apply_claim_patch,
+    profile_evidence,
     profile_summary,
 )
 from scripts.validate_iteration import validate_iteration
@@ -159,6 +160,27 @@ class StyleAndModeTests(unittest.TestCase):
         self.assertEqual(
             check_style(self.style, self.document("valid-annotated-cv.md"), "cv"), []
         )
+
+    def test_visible_html_is_checked_without_markup_or_stylesheet_noise(self) -> None:
+        document = """<!doctype html><html><head><style>
+            article article article { display: block; }
+            .hidden::after { content: 'Mit großer Begeisterung'; }
+          </style></head><body><main>
+            <h1>Erika Beispiel</h1>
+            <h2>Berufserfahrung</h2>
+            <p>Entwickelte robuste Schnittstellen.</p>
+            <p>Automatisierte wichtige Regressionstests.</p>
+          </main></body></html>"""
+        self.assertEqual(check_style(self.style, document, "cv"), [])
+
+    def test_exact_repeated_cv_role_fragments_do_not_count_as_prose_starts(self) -> None:
+        document = """# Erika Beispiel
+## Berufserfahrung
+Software-Entwicklerin
+Software-Entwicklerin
+Software-Entwicklerin
+"""
+        self.assertEqual(check_style(self.style, document, "cv"), [])
 
     def test_generic_german_style_fails(self) -> None:
         errors = check_style(
@@ -297,6 +319,28 @@ class ProfileContractTests(unittest.TestCase):
         self.assertIn("status", claim)
         self.assertIn("evidence_refs", claim)
         self.assertIn("allowed_outputs", claim)
+
+    def test_evidence_snapshot_keeps_only_publishable_output_bound_records(
+        self,
+    ) -> None:
+        result = profile_evidence(FIXTURES / "valid-candidate.yaml", "cv")
+        claim_ids = {item["id"] for item in result["claims"]}
+
+        self.assertEqual(result["contract"], "candidate-evidence-snapshot")
+        self.assertTrue(result["valid"])
+        self.assertNotIn("profile", result)
+        self.assertIn("claim-role", claim_ids)
+        self.assertIn("claim-coordination", claim_ids)
+        self.assertNotIn("claim-users", claim_ids)
+        self.assertEqual(result["records"]["experience"][0]["id"], "experience-example")
+        self.assertEqual(
+            set(result["records"]["experience"][0]["claim_ids"]),
+            {"claim-role", "claim-rabbitmq", "claim-coordination"},
+        )
+        self.assertEqual(result["records"]["languages"], [])
+
+        email = profile_evidence(FIXTURES / "valid-candidate.yaml", "email")
+        self.assertEqual(email["records"]["experience"], [])
 
     def test_patch_requires_confirmation_for_publishable_status(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -637,6 +681,12 @@ class LanguageToolTests(unittest.TestCase):
     def test_markdown_and_evidence_are_removed(self) -> None:
         text = plain_text("# Titel\n- RabbitMQ <!-- evidence: claim-rabbitmq -->")
         self.assertEqual(text, "Titel\nRabbitMQ ")
+
+    def test_html_markup_and_non_visible_head_content_are_removed(self) -> None:
+        text = plain_text("""<!doctype html><html><head><title>Intern</title>
+            <style>.secret { content: 'nicht sichtbar'; }</style></head>
+            <body><h1>Lebenslauf</h1><p>Testautomatisierung &amp; Qualität</p></body></html>""")
+        self.assertEqual(text, "Lebenslauf\n\nTestautomatisierung & Qualität")
 
 
 if __name__ == "__main__":
